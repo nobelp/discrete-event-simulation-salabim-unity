@@ -193,3 +193,26 @@ workstation, no phantom stock/space, new putaway supplying a waiting retrieval,
 and explicit relocation-time sensitivity. The complete Python suite now has
 24 passing tests. The private KX browser application uses this same module in an
 isolated local subprocess and provides a material-flow diagram and event replay.
+
+## Multi-aisle reference topology and nominal rates
+
+Coupled model 0.2 accepts an explicit `aisle` on every level and
+`liftsPerAisle` (default one for legacy scenarios). Every aisle has an independent
+FIFO resource pool. Each physical lift in that pool retains its own height and
+can serve only levels in its own aisle. Each level still has one shuttle. The
+output includes the actual aisle, lift and shuttle counts used, and the lift-unit
+ID assigned to each transport. The limit is 120 levels and 20,000 initial stock
+containers for bounded interactive runs.
+
+Optional `lift.rateBEhPerUnit` and `shuttleRateBEhPerUnit` restrict nominal transfer
+rates without replacing mechanical travel or handling times. A nominal rate is a
+throughput budget, not a measured single/double cycle. Optional lift-specific
+`pickupSeconds` and `dropoffSeconds` avoid applying a lift transfer specification
+to the shuttle. The engine itself accepts BE/h budgets only: the private planning
+UI must preserve original DC/h or ES/h statements and obtain an explicit counting
+definition before deriving any nominal budget. No optimized double-cycle or
+multi-load lift mechanism is implemented by these fields.
+
+The complete suite now passes 27 Python tests, including aisle isolation,
+multiple lifts, nominal rate ceilings and separate lift/shuttle handover times.
+All public examples remain synthetic and contain no supplier or customer data.

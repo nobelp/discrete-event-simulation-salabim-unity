@@ -62,4 +62,27 @@ class CoupledChecks(unittest.TestCase):
         d=case();self.assertEqual(run(d),run(d));del d['shuttleCycleSeconds']
         with self.assertRaises(ValueError):run(d)
 
+class TopologyChecks(unittest.TestCase):
+    def test_two_aisles_use_only_their_own_lifts(self):
+        d=case();d['levels']=[{**d['levels'][0],'aisle':'G1'}, {'id':'L2','aisle':'G2','heightM':2,'storageCapacity':5,'initialStock':2}]
+        d['liftsPerAisle']=2;d['jobs']=[{'id':str(i),'type':'retrieve','level':'L1' if i%2 else 'L2','arrivalSeconds':0,'relocations':0} for i in range(4)]
+        r=run(d);self.assertEqual(r['topology']['totalLifts'],4);self.assertEqual(r['completed'],4)
+        for j in r['jobs']:self.assertTrue(j['liftUnit'].startswith('G1' if j['level']=='L1' else 'G2'))
+        self.assertTrue(all(m['maximumOccupancy']<=m['capacity'] for m in r['resources'].values()))
+
+    def test_lift_specific_handover_times_do_not_change_shuttle_handover(self):
+        for kind, expected in [('putaway',15),('retrieve',18)]:
+            d=case();d['lift'].update(pickupSeconds=4,dropoffSeconds=5)
+            d['jobs']=[{'id':'one','type':kind,'level':'L1','arrivalSeconds':0,'relocations':0}]
+            self.assertEqual(run(d)['jobs'][0]['completedAt'],expected)
+        d['lift']['pickupSeconds']=-1
+        with self.assertRaises(ValueError):run(d)
+
+    def test_nominal_component_limits_are_enforced_without_replacing_times(self):
+        d=case();d['jobs']=[{'id':'out','type':'retrieve','level':'L1','arrivalSeconds':0,'relocations':0}]
+        baseline=run(d)['jobs'][0]['completedAt'];d['shuttleRateBEhPerUnit']=120
+        self.assertGreater(run(d)['jobs'][0]['completedAt'],baseline)
+        d['lift']['rateBEhPerUnit']=60;d['durationSeconds']=120
+        self.assertGreaterEqual(run(d)['jobs'][0]['completedAt'],92)
+
 if __name__=='__main__': unittest.main()

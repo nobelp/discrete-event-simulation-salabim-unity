@@ -1,6 +1,6 @@
 """Coupled synthetic infeed/lift/level-shuttle/storage/outfeed reference model.
 
-One shared, single-load lift remembers its last height. Each level has one
+Each aisle has a lift pool with individual positions. Each level has one
 shuttle and finite separate transfer buffers. Full downstream buffers retain
 upstream resources (blocking after service). Inventory and rack slots are separate
 from resource occupancy; there is no ABC or random relocation assumption.
@@ -39,6 +39,9 @@ def validate(data):
     if horizon > 86400:
         raise ValueError("Maximum duration: 86400 seconds")
     integer(data.get("seed"), "seed")
+    integer(data.get("liftsPerAisle", 1), "liftsPerAisle", 1, 8)
+    for rate in [data.get("shuttleRateBEhPerUnit"), data.get("lift", {}).get("rateBEhPerUnit") if isinstance(data.get("lift"), dict) else None]:
+        if rate is not None: finite(rate, "component BE/h rate", 1e-9)
     for name in ["infeedSeconds", "outfeedSeconds", "workstationSeconds", "shuttleCycleSeconds", "relocationSeconds", "pickupSeconds", "dropoffSeconds"]:
         finite(data.get(name), name)
     for name in ["inBufferCapacity", "outBufferCapacity", "levelBufferCapacity"]:
@@ -46,21 +49,25 @@ def validate(data):
     lift = data.get("lift")
     if not isinstance(lift, dict):
         raise ValueError("Lift motion data required")
+    for key in ["pickupSeconds", "dropoffSeconds"]:
+        if key in lift: finite(lift[key], key)
     for key in ["speedMps", "accelerationMps2", "decelerationMps2"]:
         finite(lift.get(key), key, 1e-9)
     levels = data.get("levels")
-    if not isinstance(levels, list) or not 1 <= len(levels) <= 30:
-        raise ValueError("1..30 explicit levels required")
+    if not isinstance(levels, list) or not 1 <= len(levels) <= 120:
+        raise ValueError("1..120 explicit levels required")
     ids = set()
     for level in levels:
         if not isinstance(level, dict) or not isinstance(level.get("id"), str) or not level["id"] or level["id"] in ids:
             raise ValueError("Unique nonempty level IDs required")
         ids.add(level["id"])
+        if not isinstance(level.get("aisle", "A1"), str) or not level.get("aisle", "A1"):
+            raise ValueError("Nonempty aisle ID required")
         finite(level.get("heightM"), "heightM", 1e-9)
         capacity = integer(level.get("storageCapacity"), "storageCapacity", 1)
         integer(level.get("initialStock"), "initialStock", 0, capacity)
-    if sum(level["initialStock"] for level in levels) > 10000:
-        raise ValueError("Maximum initial stock: 10000")
+    if sum(level["initialStock"] for level in levels) > 20000:
+        raise ValueError("Maximum initial stock: 20000")
     jobs = data.get("jobs")
     if not isinstance(jobs, list) or len(jobs) > 5000:
         raise ValueError("Explicit list of at most 5000 jobs required")
@@ -90,15 +97,19 @@ def run(data):
         stock[key] = sim.Store(name="stock-" + key, fill=[sim.Component(env=env) for _ in range(level["initialStock"])], env=env)
         rack[key] = sim.Resource(name="rack-" + key, capacity=level["storageCapacity"], initial_claimed_quantity=level["initialStock"], anonymous=True, env=env)
         physical[key] = level["initialStock"]
-    lift_height = [0.0]
+    aisle_ids = sorted({level.get("aisle", "A1") for level in data["levels"]})
+    lift_keys = {a: "lift" if len(aisle_ids) == 1 else "lift-" + a for a in aisle_ids}
+    lift_units = {a: [{"id": a + "-H" + str(i+1), "height": 0.0, "busy": False} for i in range(data.get("liftsPerAisle", 1))] for a in aisle_ids}
     counts = {"stored": 0, "picked": 0, "retrieved": 0}
 
     def resource(key, capacity):
         resources[key] = sim.Resource(name=key, capacity=capacity, env=env)
         metrics[key] = {"capacity": capacity, "occupancy": 0, "maximumOccupancy": 0, "area": 0.0, "last": 0.0, "blockedSeconds": 0.0}
 
-    for key, capacity in [("infeed", 1), ("in-buffer", data["inBufferCapacity"]), ("lift", 1), ("out-buffer", data["outBufferCapacity"]), ("outfeed", 1), ("workstation", 1)]:
+    for key, capacity in [("infeed", 1), ("in-buffer", data["inBufferCapacity"]), ("out-buffer", data["outBufferCapacity"]), ("outfeed", 1), ("workstation", 1)]:
         resource(key, capacity)
+    for aisle in aisle_ids:
+        resource(lift_keys[aisle], data.get("liftsPerAisle", 1))
     for key in definitions:
         resource("shuttle-" + key, 1)
         resource("level-in-" + key, data["levelBufferCapacity"])
@@ -145,11 +156,26 @@ def run(data):
             self.record["held"].remove(key)
             super().release(resources[key])
 
+        def acquire_lift(self):
+            self.aisle = definitions[self.job["level"]].get("aisle", "A1")
+            yield from self.acquire(lift_keys[self.aisle])
+            self.lift_unit = next(unit for unit in lift_units[self.aisle] if not unit["busy"])
+            self.lift_unit["busy"] = True
+            self.lift_started = env.now()
+            self.record["liftUnit"] = self.lift_unit["id"]
+
+        def release_lift(self):
+            rate = data["lift"].get("rateBEhPerUnit")
+            if rate:
+                yield self.hold(max(0, 3600 / rate - (env.now() - self.lift_started)))
+            self.lift_unit["busy"] = False
+            self.release_node(lift_keys[self.aisle])
+
         def move_lift(self, target):
             lift = data["lift"]
-            seconds = travel(abs(target - lift_height[0]), lift["speedMps"], lift["accelerationMps2"], lift["decelerationMps2"])
+            seconds = travel(abs(target - self.lift_unit["height"]), lift["speedMps"], lift["accelerationMps2"], lift["decelerationMps2"])
             yield self.hold(seconds)
-            lift_height[0] = target
+            self.lift_unit["height"] = target
 
         def process(self):
             job, key = self.job, self.job["level"]
@@ -158,6 +184,8 @@ def run(data):
             self.mark("arrival")
             height = definitions[key]["heightM"]
             shuttle_time = data["shuttleCycleSeconds"] + job["relocations"] * data["relocationSeconds"]
+            if data.get("shuttleRateBEhPerUnit"):
+                shuttle_time = max(shuttle_time, 3600 / data["shuttleRateBEhPerUnit"])
             if job["type"] == "putaway":
                 self.mark("waiting:storage-slot")
                 yield self.request(rack[key])
@@ -165,14 +193,14 @@ def run(data):
                 yield self.hold(data["infeedSeconds"])
                 yield from self.acquire("in-buffer")
                 self.release_node("infeed")
-                yield from self.acquire("lift")
+                yield from self.acquire_lift()
                 yield from self.move_lift(0)
-                yield self.hold(data["pickupSeconds"])
+                yield self.hold(data["lift"].get("pickupSeconds", data["pickupSeconds"]))
                 self.release_node("in-buffer")
                 yield from self.move_lift(height)
                 yield from self.acquire("level-in-" + key)
-                yield self.hold(data["dropoffSeconds"])
-                self.release_node("lift")
+                yield self.hold(data["lift"].get("dropoffSeconds", data["dropoffSeconds"]))
+                yield from self.release_lift()
                 yield from self.acquire("shuttle-" + key)
                 yield self.hold(data["pickupSeconds"])
                 self.release_node("level-in-" + key)
@@ -191,14 +219,14 @@ def run(data):
                 yield from self.acquire("level-out-" + key)
                 yield self.hold(data["dropoffSeconds"])
                 self.release_node("shuttle-" + key)
-                yield from self.acquire("lift")
+                yield from self.acquire_lift()
                 yield from self.move_lift(height)
-                yield self.hold(data["pickupSeconds"])
+                yield self.hold(data["lift"].get("pickupSeconds", data["pickupSeconds"]))
                 self.release_node("level-out-" + key)
                 yield from self.move_lift(0)
                 yield from self.acquire("out-buffer")
-                yield self.hold(data["dropoffSeconds"])
-                self.release_node("lift")
+                yield self.hold(data["lift"].get("dropoffSeconds", data["dropoffSeconds"]))
+                yield from self.release_lift()
                 yield from self.acquire("outfeed")
                 self.release_node("out-buffer")
                 yield self.hold(data["outfeedSeconds"])
@@ -233,13 +261,14 @@ def run(data):
     if len(records) != len(data["jobs"]):
         raise AssertionError("Transport arrivals not conserved")
     flows = [r["completedAt"] - r["arrivalSeconds"] for r in completed]
-    return {"modelVersion": "kx-coupled-0.1", "dataStatus": "synthetic", "evidenceStatus": "reference_only", "inputSha256": hashlib.sha256(json.dumps(data, sort_keys=True).encode()).hexdigest(), "durationSeconds": horizon,
+    return {"modelVersion": "kx-coupled-0.2", "dataStatus": "synthetic", "evidenceStatus": "reference_only", "inputSha256": hashlib.sha256(json.dumps(data, sort_keys=True).encode()).hexdigest(), "durationSeconds": horizon,
+            "topology": {"aisles": len(aisle_ids), "liftsPerAisle": data.get("liftsPerAisle", 1), "totalLifts": sum(len(v) for v in lift_units.values()), "shuttles": len(definitions)},
             "arrived": len(records), "completed": len(completed), "unfinished": len(records) - len(completed), "putawayCompleted": put, "retrievalCompleted": len(completed) - put,
             "flowSeconds": {"mean": sum(flows) / len(flows) if flows else None, "p95": percentile(flows, .95)}, "resources": metrics,
             "inventory": {k: {"initial": definitions[k]["initialStock"], "physical": physical[k], "available": len(stock[k]), "reservedForRetrieval": physical[k] - len(stock[k]), "reservedForPutaway": rack[k].claimed_quantity() - physical[k], "capacity": definitions[k]["storageCapacity"]} for k in definitions},
             "balance": {"initialStock": initial, "stored": put, "pickedForRetrieval": retrieved_picked, "finalPhysicalStock": sum(physical.values())},
             "jobs": [{k: v for k, v in r.items() if k not in ["waitingHeld", "waitingSince"]} for r in records.values()], "trace": trace, "traceTruncated": len(trace) >= 5000,
-            "limits": ["Synthetic reference case only; no validated plant performance.", "One shared single-load lift; one shuttle per level; FIFO resource requests; no optimized double cycles.", "Shuttle cycle and extra relocation time are explicit assumptions, not inferred from ABC or supplier percentages.", "Putaway reserves a rack slot before entering infeed. Retrieval reserves stock, releases physical slot at the end of its shuttle cycle.", "Finite buffers retain upstream resources; unfinished jobs may be queued, blocked or deadlocked, not an automatic deadlock proof.", "No failures, real WCS handshakes, continuous belt headway, SKU/ABC placement or calibrated multi-depth storage."]}
+            "limits": ["Synthetic reference case only; no validated plant performance.", "Separate shared single-load lift pool per aisle; individual positions; one shuttle per level; FIFO; no optimized double cycles. Optional BE/h limits are nominal throughput budgets, not calibrated double-cycle mechanics.", "Shuttle cycle and extra relocation time are explicit assumptions, not inferred from ABC or supplier percentages.", "Putaway reserves a rack slot before entering infeed. Retrieval reserves stock, releases physical slot at the end of its shuttle cycle.", "Finite buffers retain upstream resources; unfinished jobs may be queued, blocked or deadlocked, not an automatic deadlock proof.", "No failures, real WCS handshakes, continuous belt headway, SKU/ABC placement or calibrated multi-depth storage."]}
 
 
 if __name__ == "__main__":
