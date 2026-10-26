@@ -154,3 +154,42 @@ bridge against Python: three completed transports, one unfinished; invalid forma
 rejected. This checks C# compilation and interprocess data exchange, **not** Unity
 scene rendering, input events, serialization or a Windows player build. Unity
 2022.3.11f1 is required for that remaining integration check.
+
+## Coupled conveyor and container-store reference model
+
+`kx/coupled.py` connects putaway and retrieval jobs through shared resources:
+
+- Putaway: reserve a rack slot, infeed conveyor, finite ground input buffer,
+  shared lift, finite level input buffer, level shuttle, stock entry.
+- Retrieval: reserve available stock, level shuttle, finite level output buffer,
+  shared lift, finite ground output buffer, outfeed conveyor, workstation.
+
+There is one single-load lift for both directions; its actual last height is kept.
+Rest-to-rest triangular/trapezoidal motion uses explicitly provided velocity,
+acceleration and deceleration. Each level has its own shuttle. Shuttle service is
+an explicit assumed cycle time plus a specified number of relocation operations
+multiplied by an explicit additional time. No ABC distribution is inferred.
+Inventory tokens, physically occupied rack places and reservations are distinct.
+Retrieval releases its physical rack slot at the end of the shuttle cycle; a
+putaway becomes available stock after its shuttle cycle. This timing convention
+is part of the reference model and requires calibration for a real system.
+
+Blocking after service retains upstream resources when downstream buffers are
+full. The result includes time-stamped resource/stock snapshots, completed and
+unfinished jobs by direction, physical stock balance, reservations, maximum/mean
+occupancy and blocked resource time. In this coupled model an unfinished queue
+is not automatically diagnosed as a deadlock. FIFO admission and pre-reservation
+of storage space are explicit reference WCS assumptions.
+
+Only synthetic input is enabled. No double cycles, SKU/ABC stock placement,
+calibrated multi-depth shuttle mechanics, failures or supplier guarantees are
+implied. A container can visit the workstation once in a retrieval; automatic
+return/re-putaway orders are not yet generated.
+
+For a CLI run, send `examples/kx-coupled.json` to stdin of `python -m kx.coupled`.
+Eight coupled-model tests include independent single-job hand calculations,
+shared lift and inventory conservation, upstream backpressure from a slow
+workstation, no phantom stock/space, new putaway supplying a waiting retrieval,
+and explicit relocation-time sensitivity. The complete Python suite now has
+24 passing tests. The private KX browser application uses this same module in an
+isolated local subprocess and provides a material-flow diagram and event replay.

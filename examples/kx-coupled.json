@@ -1,0 +1,46 @@
+{
+  "format": "kx-coupled",
+  "version": 1,
+  "dataStatus": "synthetic",
+  "durationSeconds": 60,
+  "seed": 42,
+  "infeedSeconds": 1,
+  "outfeedSeconds": 1,
+  "workstationSeconds": 1,
+  "shuttleCycleSeconds": 2,
+  "relocationSeconds": 1,
+  "pickupSeconds": 1,
+  "dropoffSeconds": 1,
+  "inBufferCapacity": 1,
+  "outBufferCapacity": 1,
+  "levelBufferCapacity": 1,
+  "lift": {
+    "speedMps": 1,
+    "accelerationMps2": 1,
+    "decelerationMps2": 1
+  },
+  "levels": [
+    {
+      "id": "L1",
+      "heightM": 1,
+      "storageCapacity": 5,
+      "initialStock": 2
+    }
+  ],
+  "jobs": [
+    {
+      "id": "in-1",
+      "type": "putaway",
+      "level": "L1",
+      "arrivalSeconds": 0,
+      "relocations": 0
+    },
+    {
+      "id": "out-1",
+      "type": "retrieve",
+      "level": "L1",
+      "arrivalSeconds": 0,
+      "relocations": 0
+    }
+  ]
+}
