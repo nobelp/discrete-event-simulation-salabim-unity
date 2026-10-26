@@ -1,0 +1,6 @@
+.venv/
+__pycache__/
+*.pyc
+results/
+# Project and supplier data must never enter this public fork.
+private-data/

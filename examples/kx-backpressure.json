@@ -1,0 +1,17 @@
+{
+  "schemaVersion": 1,
+  "dataStatus": "synthetic",
+  "durationSeconds": 30,
+  "seed": 42,
+  "nodes": [
+    {"id": "infeed-zone", "capacity": 1, "processingSeconds": 2},
+    {"id": "workstation", "capacity": 1, "processingSeconds": 8}
+  ],
+  "connections": [["infeed-zone", "workstation"]],
+  "jobs": [
+    {"id": "demo-1", "arrivalSeconds": 0, "route": ["infeed-zone", "workstation"]},
+    {"id": "demo-2", "arrivalSeconds": 0, "route": ["infeed-zone", "workstation"]},
+    {"id": "demo-3", "arrivalSeconds": 0, "route": ["infeed-zone", "workstation"]},
+    {"id": "demo-4", "arrivalSeconds": 0, "route": ["infeed-zone", "workstation"]}
+  ]
+}
