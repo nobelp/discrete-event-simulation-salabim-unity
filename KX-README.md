@@ -7,7 +7,7 @@ and structured JSON results. All included scenarios are synthetic.
 
 This is an initial engineering foundation. It is not a commissioned conveyor model,
 a coupled shuttle/lift model, a FEM implementation, or a validated system capacity
-certificate. The new runner is not yet connected to the Unity simulation button.
+certificate. The Unity simulation button is now wired in source to a runtime form and the new Python bridge. The actual Unity editor/player build has not yet been verified.
 
 ## Windows quick start
 
@@ -100,7 +100,7 @@ Code review of upstream commit `0873dc9` found these constraints:
 
 ## Next work
 
-- Connect validated, versioned physical inputs and directed routes to Unity.
+- Verify the new physical-input forms and directed-route bridge in an actual Unity editor/player build.
 - Introduce physical segment lengths, speeds, pitch and start/stop dynamics.
 - Add transfer occupancy, merge priorities, routing, finite buffers and WCS rules.
 - Add calibrated lift/shuttle modules and controlled distribution scenarios.
@@ -115,3 +115,42 @@ them, their extracted contents or client layouts to this public fork.
 The upstream repository is licensed under GPL-3.0. This fork retains its LICENSE,
 history and attribution. The KX additions are distributed under that same license.
 See [upstream](https://github.com/markus-senger/discrete-event-simulation-salabim-unity).
+
+## Unity bridge and parameter entry
+
+The existing simulation button opens `KxSimulationPanel`. Right-click a placed
+conveyor to enter a stable zone ID, travel length in metres, constant speed in
+metres per second, explicit additional transfer time, and allowed downstream IDs.
+Connections must be explicitly confirmed, including an empty terminal list. Cloning
+an already configured object resets its identity. Zone IDs are editable for routing;
+changing an ID requires updating references. No values are inferred from pixels.
+
+The first physical-time model is deliberately narrow: one complete zone can hold
+one transport; service time is `lengthM / speedMps + transferSeconds`, and the zone
+remains occupied until the next slot is available. This is constant-speed exclusive
+zone movement, not a moving multi-load belt, acceleration model or validated plant.
+
+Enter transports as `ID;arrivalSeconds;zone1,zone2` (one per line), confirm the
+synthetic scenario, and run. Alternatively provide an existing `kx-unity-zones`
+scenario file, such as `examples/kx-unity-zones.json`. The selected virtual-environment
+Python and repository paths can be adjusted in the form. Input and result files
+are retained under `Application.persistentDataPath/kx-runs/<unique-run-id>/`.
+The old animation-speed input is disabled because it does not control simulated
+physical time. The old animation/exit-code-count route is no longer used.
+
+The C# bridge starts Python without a shell or visible helper window, reads JSON
+rather than an exit-code count, reports invalid inputs, and limits a run to 60
+seconds. The bridge can also be tested without Unity:
+
+```powershell
+.\.venv\Scripts\python.exe -m unittest discover -s tests -v
+.\.venv\Scripts\python.exe -m kx.unity_bridge examples/kx-unity-zones.json --output results/unity-zones.json
+dotnet run --project tests/csharp-check/SyntaxCheck.csproj -- "C:\path\to\this-fork"
+```
+
+Sixteen Python tests pass. The C# check compiles the new scripts against explicit
+API-shape stubs and the repository's real JSON library, then calls the real process
+bridge against Python: three completed transports, one unfinished; invalid format
+rejected. This checks C# compilation and interprocess data exchange, **not** Unity
+scene rendering, input events, serialization or a Windows player build. Unity
+2022.3.11f1 is required for that remaining integration check.

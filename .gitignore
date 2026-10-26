@@ -4,3 +4,6 @@ __pycache__/
 results/
 # Project and supplier data must never enter this public fork.
 private-data/
+
+**/bin/
+**/obj/

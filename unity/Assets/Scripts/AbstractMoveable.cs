@@ -81,6 +81,9 @@ public class AbstractMoveable : MonoBehaviour, IPointerClickHandler
         else
             component.transform.SetAsFirstSibling();
 
+        var kxSettings = component.GetComponent<KxZoneSettings>();
+        if (kxSettings != null) kxSettings.ResetIdentity();
+
         AbstractMoveable moveComponent = component.GetComponent<AbstractMoveable>();
         moveComponent.Init();
         moveComponent.SetMoveComponent(true);

@@ -1,0 +1,11 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup><TargetFramework>net8.0</TargetFramework><OutputType>Exe</OutputType><EnableDefaultCompileItems>false</EnableDefaultCompileItems><LangVersion>9.0</LangVersion></PropertyGroup>
+  <ItemGroup>
+    <Compile Include="UnityStubs.cs" />
+    <Compile Include="Program.cs" />
+    <Compile Include="../../unity/Assets/Scripts/SimulateHandler.cs" Link="SimulateHandler.cs" />
+    <Compile Include="../../unity/Assets/Scripts/KxZoneSettings.cs" Link="KxZoneSettings.cs" />
+    <Compile Include="../../unity/Assets/Scripts/KxSimulationPanel.cs" Link="KxSimulationPanel.cs" />
+    <Reference Include="Newtonsoft.Json"><HintPath>../../unity/Packages/Newtonsoft.Json.13.0.3/lib/netstandard2.0/Newtonsoft.Json.dll</HintPath></Reference>
+  </ItemGroup>
+</Project>

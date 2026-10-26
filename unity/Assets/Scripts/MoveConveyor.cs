@@ -11,7 +11,9 @@ public class MoveConveyor : AbstractMoveable
 {
     protected override void OpenComponentMenu()
     {
-        // TODO
+        var settings = GetComponent<KxZoneSettings>();
+        if (settings == null) settings = gameObject.AddComponent<KxZoneSettings>();
+        settings.Open();
     }
 
     protected override void CalcOffsetToClosestConnectionPoint()

@@ -1,0 +1,63 @@
+{
+  "format": "kx-unity-zones",
+  "version": 1,
+  "dataStatus": "synthetic",
+  "durationSeconds": 30,
+  "seed": 42,
+  "segments": [
+    {
+      "id": "a",
+      "mode": "constant_speed_exclusive_zone",
+      "lengthM": 1,
+      "speedMps": 0.5,
+      "transferSeconds": 0,
+      "nextIds": [
+        "b"
+      ],
+      "connectionsConfirmed": true
+    },
+    {
+      "id": "b",
+      "mode": "constant_speed_exclusive_zone",
+      "lengthM": 2,
+      "speedMps": 0.25,
+      "transferSeconds": 0,
+      "nextIds": [],
+      "connectionsConfirmed": true
+    }
+  ],
+  "jobs": [
+    {
+      "id": "0",
+      "arrivalSeconds": 0,
+      "route": [
+        "a",
+        "b"
+      ]
+    },
+    {
+      "id": "1",
+      "arrivalSeconds": 0,
+      "route": [
+        "a",
+        "b"
+      ]
+    },
+    {
+      "id": "2",
+      "arrivalSeconds": 0,
+      "route": [
+        "a",
+        "b"
+      ]
+    },
+    {
+      "id": "3",
+      "arrivalSeconds": 0,
+      "route": [
+        "a",
+        "b"
+      ]
+    }
+  ]
+}
