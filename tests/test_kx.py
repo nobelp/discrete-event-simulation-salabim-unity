@@ -2,7 +2,7 @@ import copy
 import json
 from pathlib import Path
 import unittest
-from kx.simulation import run
+from kx.simulation import run, diagnose_deadlocks
 from kx.import_layout import draft
 
 
@@ -78,6 +78,42 @@ class ReferenceChecks(unittest.TestCase):
         self.assertFalse(result["simulationReady"])
         self.assertIsNone(result["nodes"][0]["lengthM"])
         self.assertIsNone(result["nodes"][0]["capacity"])
+
+
+    def test_opposing_routes_prove_deadlock_without_losing_transports(self):
+        data = {"schemaVersion": 1, "dataStatus": "synthetic", "durationSeconds": 10, "seed": 42,
+                "nodes": [{"id": "a", "capacity": 1, "processingSeconds": 1}, {"id": "b", "capacity": 1, "processingSeconds": 1}],
+                "connections": [["a", "b"], ["b", "a"]],
+                "jobs": [{"id": "first", "arrivalSeconds": 0, "route": ["a", "b"]}, {"id": "second", "arrivalSeconds": 0, "route": ["b", "a"]}]}
+        result = run(data)
+        self.assertEqual(result["completed"], 0)
+        self.assertEqual(result["unfinished"], 2)
+        self.assertEqual(result["deadlockDiagnostic"]["status"], "deadlock_detected")
+        self.assertEqual(set(result["deadlockDiagnostic"]["cycles"][0]["jobs"]), {"first", "second"})
+        self.assertEqual(result["nodes"]["a"]["blockedSlotSeconds"], 9)
+
+    def test_long_processing_and_normal_backpressure_are_not_deadlocks(self):
+        for horizon in [1, 7, 30]:
+            data = case()
+            data["durationSeconds"] = horizon
+            self.assertEqual(run(data)["deadlockDiagnostic"]["cycles"], [])
+
+    def test_multislot_diagnostic_does_not_claim_absence_or_proof(self):
+        records = {
+            "one": {"state": "blocked", "waitingForNode": "b", "visits": [{"node": "a", "releasedAt": None}]},
+            "two": {"state": "blocked", "waitingForNode": "a", "visits": [{"node": "b", "releasedAt": None}]}}
+        result = diagnose_deadlocks(records, {"a": {"capacity": 2}, "b": {"capacity": 2}})
+        self.assertEqual(result["cycles"], [])
+        self.assertIn("no absence proof", result["scope"])
+
+    def test_waiting_chain_is_not_part_of_closed_cycle(self):
+        records = {
+            "one": {"state": "blocked", "waitingForNode": "b", "visits": [{"node": "a", "releasedAt": None}]},
+            "two": {"state": "blocked", "waitingForNode": "a", "visits": [{"node": "b", "releasedAt": None}]},
+            "upstream": {"state": "blocked", "waitingForNode": "a", "visits": [{"node": "c", "releasedAt": None}]}}
+        result = diagnose_deadlocks(records, {k: {"capacity": 1} for k in ["a", "b", "c"]})
+        self.assertEqual(len(result["cycles"]), 1)
+        self.assertEqual(set(result["cycles"][0]["jobs"]), {"one", "two"})
 
 
 if __name__ == "__main__":

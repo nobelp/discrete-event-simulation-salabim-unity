@@ -1,0 +1,15 @@
+{
+  "schemaVersion": 1,
+  "dataStatus": "synthetic",
+  "durationSeconds": 10,
+  "seed": 42,
+  "nodes": [
+    {"id": "zone-a", "capacity": 1, "processingSeconds": 1},
+    {"id": "zone-b", "capacity": 1, "processingSeconds": 1}
+  ],
+  "connections": [["zone-a", "zone-b"], ["zone-b", "zone-a"]],
+  "jobs": [
+    {"id": "first", "arrivalSeconds": 0, "route": ["zone-a", "zone-b"]},
+    {"id": "second", "arrivalSeconds": 0, "route": ["zone-b", "zone-a"]}
+  ]
+}

@@ -77,6 +77,44 @@ def percentile(values, fraction):
     return ordered[max(0, math.ceil(fraction * len(ordered)) - 1)]
 
 
+def diagnose_deadlocks(records, definitions):
+    """Prove closed waits between full single-slot resources, not from WIP.
+
+    The reference model has no timeout, capacity change or forced release.
+    Multi-slot waits are outside this diagnostic's scope.
+    """
+    holders = {}
+    for job_id, record in records.items():
+        for visit in record["visits"]:
+            if visit["releasedAt"] is None:
+                holders.setdefault(visit["node"], []).append(job_id)
+    successors = {}
+    for job_id, record in records.items():
+        target = record.get("waitingForNode")
+        held = [v["node"] for v in record["visits"] if v["releasedAt"] is None]
+        if record["state"] != "blocked" or len(held) != 1 or not target:
+            continue
+        if definitions[held[0]]["capacity"] == definitions[target]["capacity"] == 1 and len(holders.get(target, [])) == 1:
+            successors[job_id] = holders[target][0]
+    visited, cycles = set(), []
+    for start in sorted(successors):
+        if start in visited:
+            continue
+        path, positions, current = [], {}, start
+        while current in successors and current not in visited and current not in positions:
+            positions[current] = len(path)
+            path.append(current)
+            current = successors[current]
+        if current in positions:
+            members = path[positions[current]:]
+            cycles.append({"jobs": members,
+                           "heldNodes": [next(v["node"] for v in records[j]["visits"] if v["releasedAt"] is None) for j in members],
+                           "waitingForNodes": [records[j]["waitingForNode"] for j in members]})
+        visited.update(path)
+    return {"status": "deadlock_detected" if cycles else "no_single_slot_cycle_detected", "cycles": cycles,
+            "scope": "Closed wait cycles of single-slot nodes only; no absence proof for multi-slot networks."}
+
+
 def run(config):
     config = copy.deepcopy(config)
     definitions = validate(config)
@@ -102,13 +140,15 @@ def run(config):
 
         def process(self):
             job = self.job
-            record = records[job["id"]] = {"id": job["id"], "arrivalSeconds": job["arrivalSeconds"], "completedAt": None, "state": "waiting_for_entry", "visits": []}
+            record = records[job["id"]] = {"id": job["id"], "arrivalSeconds": job["arrivalSeconds"], "completedAt": None, "state": "waiting_for_entry", "waitingForNode": None, "visits": []}
             previous = None
             for key in job["route"]:
                 requested = env.now()
                 if previous:
                     record["state"] = "blocked"
+                record["waitingForNode"] = key
                 yield self.request(resources[key])
+                record["waitingForNode"] = None
                 acquired = env.now()
                 occupied(key, 1)
                 if previous:
@@ -153,12 +193,13 @@ def run(config):
         raise AssertionError("Transport conservation violated")
     model_hash = hashlib.sha256(json.dumps(config, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
     return {
-        "schemaVersion": 1, "modelVersion": "kx-service-network-0.1", "engine": "salabim", "engineVersion": sim.__version__, "inputSha256": model_hash, "seed": config["seed"],
+        "schemaVersion": 1, "modelVersion": "kx-service-network-0.2", "engine": "salabim", "engineVersion": sim.__version__, "inputSha256": model_hash, "seed": config["seed"],
         "evidenceStatus": "synthetic_reference_only", "measurement": {"startSeconds": 0, "endSeconds": duration, "completionBoundary": "inclusive", "warmupSeconds": 0},
         "arrived": len(records), "completed": len(completed), "unfinished": len(unfinished), "completedPerHour": len(completed) * 3600 / duration,
         "flowSeconds": {"mean": sum(flow_times) / len(flow_times) if flow_times else None, "p95": percentile(flow_times, .95), "p99": percentile(flow_times, .99)},
-        "unfinishedJobs": [{"id": r["id"], "state": r["state"], "ageSeconds": duration - r["arrivalSeconds"]} for r in unfinished], "nodes": node_metrics,
-        "limits": ["Synthetic service network only; slot capacities are explicit model assumptions.", "capacity > 1 represents parallel service slots, not a verified physical conveyor or lift.", "No continuous belt headway, pitch, acceleration, failures, priority policy or calibrated shuttle/lift mechanics.", "Unfinished transports may indicate normal WIP, overload or deadlock; no automatic deadlock diagnosis.", "Unity editor integration and supplier evidence import remain separate work."],
+        "unfinishedJobs": [{"id": r["id"], "state": r["state"], "waitingForNode": r["waitingForNode"], "ageSeconds": duration - r["arrivalSeconds"]} for r in unfinished], "nodes": node_metrics,
+        "deadlockDiagnostic": diagnose_deadlocks(records, definitions),
+        "limits": ["Synthetic service network only; slot capacities are explicit model assumptions.", "capacity > 1 represents parallel service slots, not a verified physical conveyor or lift.", "No continuous belt headway, pitch, acceleration, failures, priority policy or calibrated shuttle/lift mechanics.", "Unfinished transports may indicate normal WIP, overload or deadlock; only closed single-slot wait cycles are diagnosed.", "Unity editor integration and supplier evidence import remain separate work."],
     }
 
 

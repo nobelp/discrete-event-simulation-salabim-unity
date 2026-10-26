@@ -51,6 +51,26 @@ headway, pitch, zone control, or multi-load lift behavior. No implicit factors o
 vendor capacities are substituted for missing inputs. The runner currently accepts
 only scenarios explicitly marked `dataStatus: "synthetic"`.
 
+## Closed single-slot deadlocks
+
+Model version `kx-service-network-0.2` reports a `deadlockDiagnostic` in each result.
+It identifies closed cycles in which every transport holds a single-slot node while
+waiting for a single-slot node held by the next transport in the cycle. The model
+has no forced releases, capacity changes or timeouts that could resolve such a cycle.
+
+```powershell
+.\.venv\Scripts\python.exe -m kx.simulation examples/kx-deadlock.json --output results/deadlock.json
+```
+
+In this synthetic case two transports enter opposite zones at time zero, finish
+service at one second, and each waits for the other's zone. At ten seconds the
+result retains both unfinished transports and reports their held/waiting nodes.
+Ordinary queues, long service times and finite-horizon WIP are not classified as
+deadlocks merely because transports remain unfinished. Multi-slot networks are
+explicitly outside this diagnostic's scope: no detected cycle is not proof that
+such a network is deadlock-free. Thirteen tests now cover the reference runner,
+including closed cycles, noncyclic upstream waiters and these scope limits.
+
 ## Import the existing Unity layout
 
 ```powershell
