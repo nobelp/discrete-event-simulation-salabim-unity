@@ -66,5 +66,29 @@ class ReturnChecks(unittest.TestCase):
         d = self.scenario(); d['returnToStorage'] = 'yes'
         with self.assertRaises(ValueError): run(d)
 
+    def test_explicit_other_aisle_target_uses_its_lift_and_inventory(self):
+        d = self.scenario(); d['levels'][0]['aisle'] = 'G1'
+        d['levels'].append(dict(id='L2', aisle='G2', heightM=2, storageCapacity=5, initialStock=0))
+        d['returnLevel'] = 'L2'
+        r = run(d)
+        self.assertEqual(r['jobs'][0]['returnedAt'], 23)
+        self.assertEqual(r['jobs'][0]['returnLevel'], 'L2')
+        self.assertEqual(r['jobs'][0]['liftUnit'], 'G1-H1')
+        self.assertEqual(r['jobs'][0]['returnLiftUnit'], 'G2-H1')
+        self.assertEqual(r['inventory']['L1']['physical'], 1)
+        self.assertEqual(r['inventory']['L2']['physical'], 1)
+        self.assertEqual(r['returnCompleted'], 1)
+
+    def test_full_target_does_not_fall_back_to_free_source_slot(self):
+        d = self.scenario(); d['levels'].append(dict(id='L2', heightM=2, storageCapacity=1, initialStock=1))
+        d['returnLevel'] = 'L2'
+        r = run(d)
+        self.assertEqual(r['returnCompleted'], 0)
+        self.assertEqual(r['jobs'][0]['stage'], 'waiting:storage-slot')
+        self.assertEqual(r['inventory']['L1']['physical'], 1)
+        self.assertEqual(r['inventory']['L2']['physical'], 1)
+        d['returnLevel'] = 'missing'
+        with self.assertRaises(ValueError): run(d)
+
 
 if __name__ == '__main__': unittest.main()

@@ -82,6 +82,8 @@ def validate(data):
         finite(level.get("heightM"), "heightM", 1e-9)
         capacity = integer(level.get("storageCapacity"), "storageCapacity", 1)
         integer(level.get("initialStock"), "initialStock", 0, capacity)
+    if "returnLevel" in data and (not isinstance(data["returnLevel"], str) or data["returnLevel"] not in ids):
+        raise ValueError("returnLevel must identify an existing storage level")
     if sum(level["initialStock"] for level in levels) > 20000:
         raise ValueError("Maximum initial stock: 20000")
     jobs = data.get("jobs")
@@ -175,13 +177,13 @@ def run(data):
             self.record["held"].remove(key)
             super().release(resources[key])
 
-        def acquire_lift(self):
-            self.aisle = definitions[self.job["level"]].get("aisle", "A1")
+        def acquire_lift(self, level=None):
+            self.aisle = definitions[level or self.job["level"]].get("aisle", "A1")
             yield from self.acquire(lift_keys[self.aisle])
             self.lift_unit = next(unit for unit in lift_units[self.aisle] if not unit["busy"])
             self.lift_unit["busy"] = True
             self.lift_started = env.now()
-            self.record["liftUnit"] = self.lift_unit["id"]
+            self.record["returnLiftUnit" if self.record.get("phase") == "return" else "liftUnit"] = self.lift_unit["id"]
 
         def release_lift(self):
             rate = data["lift"].get("rateBEhPerUnit")
@@ -197,7 +199,7 @@ def run(data):
             self.lift_unit["height"] = target
 
         def return_container(self, key, height):
-            # Return to the same level via the shared infeed/lift/shuttle path.
+            # Return to the explicit target via the shared infeed/lift/shuttle path.
             r = self.record
             r["waitingSince"], r["waitingHeld"] = env.now(), list(r["held"])
             self.mark("waiting:storage-slot")
@@ -210,7 +212,7 @@ def run(data):
             yield self.hold(data["infeedSeconds"])
             yield from self.acquire("in-buffer")
             self.release_node("infeed")
-            yield from self.acquire_lift()
+            yield from self.acquire_lift(key)
             yield from self.move_lift(0)
             yield self.hold(data["lift"].get("pickupSeconds", data["pickupSeconds"]))
             self.release_node("in-buffer")
@@ -312,7 +314,9 @@ def run(data):
                 self.release_node("workstation")
                 if data.get("returnToStorage"):
                     yield self.hold(data["returnSeconds"])
-                    yield from self.return_container(key, height)
+                    target = data.get("returnLevel", key)
+                    r["returnLevel"] = target
+                    yield from self.return_container(target, definitions[target]["heightM"])
                     counts["returned"] += 1
                     r["returnedAt"] = env.now()
             if job["type"] == "putaway":
@@ -343,14 +347,14 @@ def run(data):
     if len(records) != len(data["jobs"]):
         raise AssertionError("Transport arrivals not conserved")
     flows = [r["completedAt"] - r["arrivalSeconds"] for r in completed]
-    return {"modelVersion": "kx-coupled-0.4", "dataStatus": "synthetic", "evidenceStatus": "reference_only", "inputSha256": hashlib.sha256(json.dumps(data, sort_keys=True).encode()).hexdigest(), "durationSeconds": horizon,
+    return {"modelVersion": "kx-coupled-0.5", "dataStatus": "synthetic", "evidenceStatus": "reference_only", "inputSha256": hashlib.sha256(json.dumps(data, sort_keys=True).encode()).hexdigest(), "durationSeconds": horizon,
             "topology": {"aisles": len(aisle_ids), "liftsPerAisle": data.get("liftsPerAisle", 1), "totalLifts": sum(len(v) for v in lift_units.values()), "shuttles": len(definitions)},
             "arrived": len(records), "completed": len(completed), "unfinished": len(records) - len(completed), "putawayCompleted": put, "retrievalCompleted": counts["retrieved"], "returnCompleted": counts["returned"], "returnsPending": counts["retrieved"] - counts["returned"] if data.get("returnToStorage") else 0,
             "flowSeconds": {"mean": sum(flows) / len(flows) if flows else None, "p95": percentile(flows, .95)}, "resources": metrics,
             "inventory": {k: {"initial": definitions[k]["initialStock"], "physical": physical[k], "available": len(stock[k]), "reservedForRetrieval": physical[k] - len(stock[k]), "reservedForPutaway": rack[k].claimed_quantity() - physical[k], "capacity": definitions[k]["storageCapacity"]} for k in definitions},
             "balance": {"initialStock": initial, "stored": put, "returned": counts["returned"], "pickedForRetrieval": retrieved_picked, "finalPhysicalStock": sum(physical.values())},
             "jobs": [{k: v for k, v in r.items() if k not in ["waitingHeld", "waitingSince"]} for r in records.values()], "trace": trace, "traceTruncated": len(trace) >= 5000,
-            "limits": ["Synthetic reference case only; no validated plant performance. Explicit workstation downtime pauses remaining service while keeping the container; no additional availability factor.", "Separate shared single-load lift pool per aisle; individual positions; one shuttle per level; FIFO; no optimized double cycles. Optional BE/h limits are nominal throughput budgets, not calibrated double-cycle mechanics.", "Shuttle cycle and extra relocation time are explicit assumptions, not inferred from ABC or supplier percentages.", "Putaway reserves a rack slot before entering infeed. Retrieval reserves stock, releases physical slot at the end of its shuttle cycle.", "Finite buffers retain upstream resources; unfinished jobs may be queued, blocked or deadlocked, not an automatic deadlock proof.", "Optional return loop sends every retrieved container to its original level via a finite return zone and shared infeed/lift/shuttle; no alternate-level policy, empty-container supply, stochastic failures, real WCS handshakes, continuous belt headway, SKU/ABC placement or calibrated multi-depth storage."]}
+            "limits": ["Synthetic reference case only; no validated plant performance. Explicit workstation downtime pauses remaining service while keeping the container; no additional availability factor.", "Separate shared single-load lift pool per aisle; individual positions; one shuttle per level; FIFO; no optimized double cycles. Optional BE/h limits are nominal throughput budgets, not calibrated double-cycle mechanics.", "Shuttle cycle and extra relocation time are explicit assumptions, not inferred from ABC or supplier percentages.", "Putaway reserves a rack slot before entering infeed. Retrieval reserves stock, releases physical slot at the end of its shuttle cycle.", "Finite buffers retain upstream resources; unfinished jobs may be queued, blocked or deadlocked, not an automatic deadlock proof.", "Optional return loop sends every retrieved container to its original or explicitly selected level via a finite return zone and shared infeed/lift/shuttle; no automatic alternate-level policy, empty-container supply, stochastic failures, real WCS handshakes, continuous belt headway, SKU/ABC placement or calibrated multi-depth storage."]}
 
 
 if __name__ == "__main__":

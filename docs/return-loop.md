@@ -32,3 +32,18 @@ hand schedule, measurement-end open returns, reuse of returned stock, return-zon
 backpressure, full-rack waiting, and required inputs. Full suite: 33 Python tests.
 No alternate-level routing, empty-container supply, optimized double cycles,
 SKU identities or actual WCS handshakes are implemented by this extension.
+
+## Explicit target extension (kx-coupled-0.5)
+
+Optional `returnLevel` names an existing level. All returns then use that target
+instead of their source level. They still pass through the common return zone and
+infeed; the target aisle's lift pool, target level buffer and shuttle are used.
+This assumes a common infeed serving all modeled aisles, not a validated physical
+connection between real aisles. Include the required return transport time explicitly.
+
+The source `level` and outbound `liftUnit` stay in the job record. `returnLevel`
+and `returnLiftUnit` identify the return leg. A full target blocks; there is no
+automatic fallback to the now-free source slot. Omitting `returnLevel` retains the
+original-level policy. This is explicit target routing, not automatic WCS dispatch.
+Two new tests verify cross-aisle timing/resources/stock and full-target waiting.
+Full Python suite: 41 tests.
