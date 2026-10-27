@@ -1,0 +1,357 @@
+{
+  "format": "kx-coupled",
+  "version": 1,
+  "dataStatus": "synthetic",
+  "durationSeconds": 2000,
+  "seed": 1,
+  "liftsPerAisle": 2,
+  "workstationCapacity": 2,
+  "infeedSeconds": 0.2,
+  "outfeedSeconds": 0.3,
+  "workstationSeconds": 0.5,
+  "shuttleCycleSeconds": 0.4,
+  "relocationSeconds": 0.1,
+  "pickupSeconds": 0.2,
+  "dropoffSeconds": 0.2,
+  "inBufferCapacity": 2,
+  "outBufferCapacity": 2,
+  "levelBufferCapacity": 2,
+  "lift": {
+    "speedMps": 2,
+    "accelerationMps2": 1,
+    "decelerationMps2": 1,
+    "loadCapacity": 2,
+    "dispatchPolicy": "same-level-fifo-batch",
+    "batchWaitSeconds": 1
+  },
+  "levels": [
+    {
+      "id": "A-1",
+      "aisle": "A",
+      "heightM": 0.5,
+      "storageCapacity": 100,
+      "initialStock": 20
+    },
+    {
+      "id": "A-2",
+      "aisle": "A",
+      "heightM": 1.0,
+      "storageCapacity": 100,
+      "initialStock": 20
+    },
+    {
+      "id": "A-3",
+      "aisle": "A",
+      "heightM": 1.5,
+      "storageCapacity": 100,
+      "initialStock": 20
+    },
+    {
+      "id": "B-1",
+      "aisle": "B",
+      "heightM": 0.5,
+      "storageCapacity": 100,
+      "initialStock": 20
+    },
+    {
+      "id": "B-2",
+      "aisle": "B",
+      "heightM": 1.0,
+      "storageCapacity": 100,
+      "initialStock": 20
+    },
+    {
+      "id": "B-3",
+      "aisle": "B",
+      "heightM": 1.5,
+      "storageCapacity": 100,
+      "initialStock": 20
+    }
+  ],
+  "jobs": [
+    {
+      "id": "9",
+      "type": "putaway",
+      "level": "A-1",
+      "arrivalSeconds": 0,
+      "relocations": 0
+    },
+    {
+      "id": "30",
+      "type": "retrieve",
+      "level": "B-1",
+      "arrivalSeconds": 1,
+      "relocations": 2
+    },
+    {
+      "id": "1",
+      "type": "putaway",
+      "level": "A-3",
+      "arrivalSeconds": 3,
+      "relocations": 3
+    },
+    {
+      "id": "3",
+      "type": "putaway",
+      "level": "A-2",
+      "arrivalSeconds": 3,
+      "relocations": 3
+    },
+    {
+      "id": "8",
+      "type": "retrieve",
+      "level": "B-2",
+      "arrivalSeconds": 3,
+      "relocations": 2
+    },
+    {
+      "id": "32",
+      "type": "retrieve",
+      "level": "B-3",
+      "arrivalSeconds": 5,
+      "relocations": 1
+    },
+    {
+      "id": "13",
+      "type": "putaway",
+      "level": "B-2",
+      "arrivalSeconds": 7,
+      "relocations": 3
+    },
+    {
+      "id": "15",
+      "type": "putaway",
+      "level": "A-3",
+      "arrivalSeconds": 7,
+      "relocations": 1
+    },
+    {
+      "id": "24",
+      "type": "retrieve",
+      "level": "B-1",
+      "arrivalSeconds": 7,
+      "relocations": 3
+    },
+    {
+      "id": "33",
+      "type": "putaway",
+      "level": "B-2",
+      "arrivalSeconds": 7,
+      "relocations": 0
+    },
+    {
+      "id": "16",
+      "type": "retrieve",
+      "level": "B-1",
+      "arrivalSeconds": 9,
+      "relocations": 0
+    },
+    {
+      "id": "22",
+      "type": "retrieve",
+      "level": "A-3",
+      "arrivalSeconds": 9,
+      "relocations": 3
+    },
+    {
+      "id": "36",
+      "type": "retrieve",
+      "level": "B-2",
+      "arrivalSeconds": 11,
+      "relocations": 3
+    },
+    {
+      "id": "23",
+      "type": "putaway",
+      "level": "B-2",
+      "arrivalSeconds": 12,
+      "relocations": 0
+    },
+    {
+      "id": "6",
+      "type": "retrieve",
+      "level": "B-3",
+      "arrivalSeconds": 14,
+      "relocations": 2
+    },
+    {
+      "id": "27",
+      "type": "putaway",
+      "level": "A-1",
+      "arrivalSeconds": 14,
+      "relocations": 0
+    },
+    {
+      "id": "2",
+      "type": "retrieve",
+      "level": "B-1",
+      "arrivalSeconds": 15,
+      "relocations": 3
+    },
+    {
+      "id": "29",
+      "type": "putaway",
+      "level": "A-3",
+      "arrivalSeconds": 15,
+      "relocations": 0
+    },
+    {
+      "id": "28",
+      "type": "retrieve",
+      "level": "A-2",
+      "arrivalSeconds": 16,
+      "relocations": 3
+    },
+    {
+      "id": "35",
+      "type": "putaway",
+      "level": "B-1",
+      "arrivalSeconds": 16,
+      "relocations": 2
+    },
+    {
+      "id": "10",
+      "type": "retrieve",
+      "level": "B-3",
+      "arrivalSeconds": 17,
+      "relocations": 0
+    },
+    {
+      "id": "14",
+      "type": "retrieve",
+      "level": "B-1",
+      "arrivalSeconds": 17,
+      "relocations": 1
+    },
+    {
+      "id": "26",
+      "type": "retrieve",
+      "level": "A-3",
+      "arrivalSeconds": 17,
+      "relocations": 2
+    },
+    {
+      "id": "34",
+      "type": "retrieve",
+      "level": "A-2",
+      "arrivalSeconds": 17,
+      "relocations": 1
+    },
+    {
+      "id": "0",
+      "type": "retrieve",
+      "level": "A-2",
+      "arrivalSeconds": 18,
+      "relocations": 0
+    },
+    {
+      "id": "5",
+      "type": "putaway",
+      "level": "B-1",
+      "arrivalSeconds": 19,
+      "relocations": 0
+    },
+    {
+      "id": "18",
+      "type": "retrieve",
+      "level": "A-2",
+      "arrivalSeconds": 20,
+      "relocations": 2
+    },
+    {
+      "id": "11",
+      "type": "putaway",
+      "level": "B-1",
+      "arrivalSeconds": 21,
+      "relocations": 1
+    },
+    {
+      "id": "25",
+      "type": "putaway",
+      "level": "B-1",
+      "arrivalSeconds": 21,
+      "relocations": 1
+    },
+    {
+      "id": "37",
+      "type": "putaway",
+      "level": "A-3",
+      "arrivalSeconds": 21,
+      "relocations": 0
+    },
+    {
+      "id": "20",
+      "type": "retrieve",
+      "level": "B-3",
+      "arrivalSeconds": 22,
+      "relocations": 3
+    },
+    {
+      "id": "12",
+      "type": "retrieve",
+      "level": "B-1",
+      "arrivalSeconds": 23,
+      "relocations": 0
+    },
+    {
+      "id": "19",
+      "type": "putaway",
+      "level": "A-1",
+      "arrivalSeconds": 23,
+      "relocations": 2
+    },
+    {
+      "id": "39",
+      "type": "putaway",
+      "level": "B-2",
+      "arrivalSeconds": 24,
+      "relocations": 1
+    },
+    {
+      "id": "7",
+      "type": "putaway",
+      "level": "B-3",
+      "arrivalSeconds": 25,
+      "relocations": 1
+    },
+    {
+      "id": "38",
+      "type": "retrieve",
+      "level": "B-1",
+      "arrivalSeconds": 25,
+      "relocations": 1
+    },
+    {
+      "id": "17",
+      "type": "putaway",
+      "level": "B-1",
+      "arrivalSeconds": 26,
+      "relocations": 0
+    },
+    {
+      "id": "21",
+      "type": "putaway",
+      "level": "B-2",
+      "arrivalSeconds": 26,
+      "relocations": 1
+    },
+    {
+      "id": "31",
+      "type": "putaway",
+      "level": "B-3",
+      "arrivalSeconds": 27,
+      "relocations": 3
+    },
+    {
+      "id": "4",
+      "type": "retrieve",
+      "level": "A-1",
+      "arrivalSeconds": 28,
+      "relocations": 3
+    }
+  ],
+  "returnToStorage": true,
+  "returnSeconds": 0.5,
+  "returnCapacity": 2,
+  "returnLevel": "B-3"
+}

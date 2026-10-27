@@ -13,6 +13,7 @@ import sys
 import salabim as sim
 from .simulation import finite, percentile
 from .cycle_times import travel
+from .wait_graph import diagnose
 
 
 def integer(value, name, minimum=0, maximum=100000):
@@ -158,6 +159,7 @@ def run(data):
 
         def acquire(self, key):
             r = self.record
+            r["waitingFor"] = key
             r["waitingSince"] = env.now()
             r["waitingHeld"] = list(r["held"])
             self.mark("waiting:" + key)
@@ -166,6 +168,7 @@ def run(data):
                 metrics[held]["blockedSeconds"] += env.now() - r["waitingSince"]
             r["waitingSince"] = None
             r["waitingHeld"] = []
+            r["waitingFor"] = None
             r["held"].append(key)
             metrics[key]["visits"] += 1
             change(key, 1)
@@ -224,6 +227,7 @@ def run(data):
                        "source": source, "destination": destination, "level": level}
             self.record["waitingSince"] = env.now()
             self.record["waitingHeld"] = list(self.record["held"])
+            self.record["waitingFor"] = lift_keys[aisle]
             self.mark("waiting:two-load-lift")
             batch_queues[aisle].append(request)
             for worker in batch_workers:
@@ -377,6 +381,7 @@ def run(data):
                     for held in record["waitingHeld"]:
                         metrics[held]["blockedSeconds"] += env.now()-record["waitingSince"]
                     record["waitingSince"], record["waitingHeld"] = None, []
+                    record["waitingFor"] = None
                     transport.release_node(request["source"])
                     record["returnLiftUnit" if record.get("phase") == "return" else "liftUnit"] = self.lift_unit["id"]
                     report["loaded"] += 1
@@ -391,11 +396,13 @@ def run(data):
                     request["worker"] = self
                     self.record["waitingSince"] = env.now()
                     self.record["waitingHeld"] = [lift_keys[self.aisle]]
+                    self.record["waitingFor"] = request["destination"]
                     self.mark("waiting:two-load-drop-buffer")
                     transport.activate()
                     yield self.passivate()
                     metrics[lift_keys[self.aisle]]["blockedSeconds"] += env.now()-self.record["waitingSince"]
                     self.record["waitingSince"], self.record["waitingHeld"] = None, []
+                    self.record["waitingFor"] = None
                     yield from self.service(lift_keys[self.aisle], data["lift"].get("dropoffSeconds", data["dropoffSeconds"]))
                     report["unloaded"] += 1
                     transport.mark("two-load-lift-unloaded")
@@ -479,6 +486,7 @@ def run(data):
     return {"modelVersion": "kx-coupled-0.7", "dataStatus": "synthetic", "evidenceStatus": "reference_only", "inputSha256": hashlib.sha256(json.dumps(data, sort_keys=True).encode()).hexdigest(), "durationSeconds": horizon,
             "topology": {"aisles": len(aisle_ids), "liftsPerAisle": data.get("liftsPerAisle", 1), "totalLifts": sum(len(v) for v in lift_units.values()), "shuttles": len(definitions), "liftLoadCapacity": data["lift"].get("loadCapacity", 1)},
             "liftBatches": lift_batches,
+            "waitDiagnostics": diagnose(metrics, list(records.values()) + worker_records),
             "arrived": len(records), "completed": len(completed), "unfinished": len(records) - len(completed), "putawayCompleted": put, "retrievalCompleted": counts["retrieved"], "returnCompleted": counts["returned"], "returnsPending": counts["retrieved"] - counts["returned"] if data.get("returnToStorage") else 0,
             "flowSeconds": {"count": len(flows), "mean": sum(flows) / len(flows) if flows else None, "p95": percentile(flows, .95), "p99": percentile(flows, .99), "max": max(flows) if flows else None}, "resources": metrics, "domains": domain_metrics, "workloadByLevel": workload,
             "pendingAgeSeconds": {"count": len(ages), "mean": sum(ages)/len(ages) if ages else None, "max": max(ages) if ages else None, "p95": percentile(ages, .95), "p99": percentile(ages, .99)},
