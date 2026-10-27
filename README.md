@@ -51,7 +51,9 @@ The synthetic coupled model supports an explicitly configured finite return path
 from workplace to original storage level through the shared infeed, lift and
 shuttle resources. It reports workplace completions, completed returns and pending
 cycles separately. See [return-loop reference policy](docs/return-loop.md).
-This is not a validated plant/WCS strategy. The Python suite now contains 33 tests.
+This is not a validated plant/WCS strategy. Explicit workstation stop intervals
+can pause and resume processing with downstream backpressure; see
+[workstation stops](docs/workstation-stops.md). The Python suite now contains 39 tests.
   
 ![image](https://github.com/markus-senger/discrete-event-simulation-salabim-unity/assets/77236323/5249cf12-cad5-4d95-970e-fabc261611c2)
 

@@ -40,6 +40,17 @@ def validate(data):
         raise ValueError("Maximum duration: 86400 seconds")
     integer(data.get("seed"), "seed")
     integer(data.get("liftsPerAisle", 1), "liftsPerAisle", 1, 8)
+    stops = data.get("workstationStops", [])
+    if not isinstance(stops, list) or len(stops) > 100:
+        raise ValueError("workstationStops: at most 100 explicit intervals required")
+    previous_end = -1
+    for stop in stops:
+        if not isinstance(stop, list) or len(stop) != 2:
+            raise ValueError("workstationStops: [startSeconds,endSeconds] required")
+        start, end = finite(stop[0], "stop start"), finite(stop[1], "stop end")
+        if start >= end or start >= horizon or start < previous_end:
+            raise ValueError("Workstation stops must be sorted, nonoverlapping, positive-length and start before measurement end")
+        previous_end = end
     if not isinstance(data.get("returnToStorage", False), bool):
         raise ValueError("returnToStorage: boolean required")
     if data.get("returnToStorage"):
@@ -113,6 +124,7 @@ def run(data):
 
     for key, capacity in [("infeed", 1), ("in-buffer", data["inBufferCapacity"]), ("out-buffer", data["outBufferCapacity"]), ("outfeed", 1), ("workstation", 1)]:
         resource(key, capacity)
+    metrics["workstation"].update(scheduledDowntimeSeconds=sum(max(0, min(horizon, end)-start) for start, end in data.get("workstationStops", [])), pausedOccupiedSeconds=0.0, processingSeconds=0.0)
     for aisle in aisle_ids:
         resource(lift_keys[aisle], data.get("liftsPerAisle", 1))
     if data.get("returnToStorage"):
@@ -217,6 +229,24 @@ def run(data):
             yield self.to_store(stock[key], sim.Component(env=env))
             self.release_node("shuttle-" + key)
 
+        def process_workstation(self):
+            # The workstation may hold one container while stopped. Processing
+            # resumes with its remaining service time, without restarting it.
+            remaining = data["workstationSeconds"]
+            while remaining > 0:
+                now = env.now()
+                stop = next(((start, end) for start, end in data.get("workstationStops", []) if end > now), None)
+                if stop and stop[0] <= now:
+                    self.mark("workstation-stopped")
+                    metrics["workstation"]["pausedOccupiedSeconds"] += max(0, min(horizon, stop[1])-now)
+                    yield self.hold(stop[1]-now)
+                    continue
+                seconds = min(remaining, stop[0]-now) if stop else remaining
+                self.mark("workstation-processing")
+                metrics["workstation"]["processingSeconds"] += max(0, min(horizon-now, seconds))
+                yield self.hold(seconds)
+                remaining -= seconds
+
         def process(self):
             job, key = self.job, self.job["level"]
             r = self.record = {**job, "completedAt": None, "stage": "arrival", "held": [], "waitingSince": None, "waitingHeld": []}
@@ -272,7 +302,7 @@ def run(data):
                 yield self.hold(data["outfeedSeconds"])
                 yield from self.acquire("workstation")
                 self.release_node("outfeed")
-                yield self.hold(data["workstationSeconds"])
+                yield from self.process_workstation()
                 counts["retrieved"] += 1
                 r["retrievedAt"] = env.now()
                 self.mark("workstation-complete")
@@ -313,14 +343,14 @@ def run(data):
     if len(records) != len(data["jobs"]):
         raise AssertionError("Transport arrivals not conserved")
     flows = [r["completedAt"] - r["arrivalSeconds"] for r in completed]
-    return {"modelVersion": "kx-coupled-0.3", "dataStatus": "synthetic", "evidenceStatus": "reference_only", "inputSha256": hashlib.sha256(json.dumps(data, sort_keys=True).encode()).hexdigest(), "durationSeconds": horizon,
+    return {"modelVersion": "kx-coupled-0.4", "dataStatus": "synthetic", "evidenceStatus": "reference_only", "inputSha256": hashlib.sha256(json.dumps(data, sort_keys=True).encode()).hexdigest(), "durationSeconds": horizon,
             "topology": {"aisles": len(aisle_ids), "liftsPerAisle": data.get("liftsPerAisle", 1), "totalLifts": sum(len(v) for v in lift_units.values()), "shuttles": len(definitions)},
             "arrived": len(records), "completed": len(completed), "unfinished": len(records) - len(completed), "putawayCompleted": put, "retrievalCompleted": counts["retrieved"], "returnCompleted": counts["returned"], "returnsPending": counts["retrieved"] - counts["returned"] if data.get("returnToStorage") else 0,
             "flowSeconds": {"mean": sum(flows) / len(flows) if flows else None, "p95": percentile(flows, .95)}, "resources": metrics,
             "inventory": {k: {"initial": definitions[k]["initialStock"], "physical": physical[k], "available": len(stock[k]), "reservedForRetrieval": physical[k] - len(stock[k]), "reservedForPutaway": rack[k].claimed_quantity() - physical[k], "capacity": definitions[k]["storageCapacity"]} for k in definitions},
             "balance": {"initialStock": initial, "stored": put, "returned": counts["returned"], "pickedForRetrieval": retrieved_picked, "finalPhysicalStock": sum(physical.values())},
             "jobs": [{k: v for k, v in r.items() if k not in ["waitingHeld", "waitingSince"]} for r in records.values()], "trace": trace, "traceTruncated": len(trace) >= 5000,
-            "limits": ["Synthetic reference case only; no validated plant performance.", "Separate shared single-load lift pool per aisle; individual positions; one shuttle per level; FIFO; no optimized double cycles. Optional BE/h limits are nominal throughput budgets, not calibrated double-cycle mechanics.", "Shuttle cycle and extra relocation time are explicit assumptions, not inferred from ABC or supplier percentages.", "Putaway reserves a rack slot before entering infeed. Retrieval reserves stock, releases physical slot at the end of its shuttle cycle.", "Finite buffers retain upstream resources; unfinished jobs may be queued, blocked or deadlocked, not an automatic deadlock proof.", "Optional return loop sends every retrieved container to its original level via a finite return zone and shared infeed/lift/shuttle; no alternate-level policy, empty-container supply, failures, real WCS handshakes, continuous belt headway, SKU/ABC placement or calibrated multi-depth storage."]}
+            "limits": ["Synthetic reference case only; no validated plant performance. Explicit workstation downtime pauses remaining service while keeping the container; no additional availability factor.", "Separate shared single-load lift pool per aisle; individual positions; one shuttle per level; FIFO; no optimized double cycles. Optional BE/h limits are nominal throughput budgets, not calibrated double-cycle mechanics.", "Shuttle cycle and extra relocation time are explicit assumptions, not inferred from ABC or supplier percentages.", "Putaway reserves a rack slot before entering infeed. Retrieval reserves stock, releases physical slot at the end of its shuttle cycle.", "Finite buffers retain upstream resources; unfinished jobs may be queued, blocked or deadlocked, not an automatic deadlock proof.", "Optional return loop sends every retrieved container to its original level via a finite return zone and shared infeed/lift/shuttle; no alternate-level policy, empty-container supply, stochastic failures, real WCS handshakes, continuous belt headway, SKU/ABC placement or calibrated multi-depth storage."]}
 
 
 if __name__ == "__main__":
