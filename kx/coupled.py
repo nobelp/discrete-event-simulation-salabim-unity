@@ -60,9 +60,11 @@ def validate(data):
         raise ValueError("Lift motion data required")
     integer(lift.get("loadCapacity", 1), "lift loadCapacity", 1, 2)
     if lift.get("loadCapacity", 1) == 2:
-        if lift.get("dispatchPolicy") != "same-level-fifo-batch":
-            raise ValueError("Two-load lift needs explicit same-level-fifo-batch reference policy")
+        if lift.get("dispatchPolicy") not in ["same-level-fifo-batch", "alternating-in-out"]:
+            raise ValueError("Two-load lift needs explicit reference dispatch policy")
         finite(lift.get("batchWaitSeconds"), "batchWaitSeconds")
+        if lift.get("initialDirection", "retrieve") not in ["retrieve", "putaway"]:
+            raise ValueError("initialDirection must be retrieve or putaway")
     for key in ["pickupSeconds", "dropoffSeconds"]:
         if key in lift: finite(lift[key], key)
     for key in ["speedMps", "accelerationMps2", "decelerationMps2"]:
@@ -82,8 +84,8 @@ def validate(data):
         integer(level.get("initialStock"), "initialStock", 0, capacity)
     if "returnLevel" in data and (not isinstance(data["returnLevel"], str) or data["returnLevel"] not in ids):
         raise ValueError("returnLevel must identify an existing storage level")
-    if sum(level["initialStock"] for level in levels) > 20000:
-        raise ValueError("Maximum initial stock: 20000")
+    if sum(level["initialStock"] for level in levels) > 100000:
+        raise ValueError("Maximum initial stock: 100000")
     jobs = data.get("jobs")
     if not isinstance(jobs, list) or len(jobs) > 5000:
         raise ValueError("Explicit list of at most 5000 jobs required")
@@ -97,6 +99,10 @@ def validate(data):
         if finite(job.get("arrivalSeconds"), "arrivalSeconds") >= horizon:
             raise ValueError("Job arrivals must precede measurement end")
         integer(job.get("relocations"), "relocations", 0, 100)
+    if any("workstation" in j for j in jobs):
+        for job in jobs:
+            if job["type"] == "retrieve":
+                integer(job.get("workstation"), "explicit workstation", 1, data.get("workstationCapacity", 1))
     return data
 
 
@@ -118,7 +124,9 @@ def run(data):
     lift_units = {a: [{"id": a + "-H" + str(i+1), "height": 0.0, "busy": False} for i in range(data.get("liftsPerAisle", 1))] for a in aisle_ids}
     counts = {"stored": 0, "picked": 0, "retrieved": 0, "returned": 0}
     batch_queues = {a: [] for a in aisle_ids}
-    batch_workers, worker_records, lift_batches = [], [], []
+    batch_workers, worker_records, lift_batches, lift_cycles = [], [], [], []
+    explicit_workplaces = any("workstation" in j for j in data["jobs"])
+    workplace_completed = {i: 0 for i in range(1, data.get("workstationCapacity", 1)+1)} if explicit_workplaces else {}
 
     def resource(key, capacity):
         resources[key] = sim.Resource(name=key, capacity=capacity, env=env)
@@ -127,6 +135,9 @@ def run(data):
     for key, capacity in [("infeed", 1), ("in-buffer", data["inBufferCapacity"]), ("out-buffer", data["outBufferCapacity"]), ("outfeed", 1), ("workstation", data.get("workstationCapacity", 1))]:
         resource(key, capacity)
     metrics["workstation"].update(scheduledDowntimeSeconds=sum(max(0, min(horizon, end)-start) for start, end in data.get("workstationStops", [])), pausedOccupiedSeconds=0.0, processingSeconds=0.0)
+    for i in workplace_completed:
+        resource("workplace-"+str(i),1)
+        metrics["workplace-"+str(i)].update(pausedOccupiedSeconds=0.0)
     for aisle in aisle_ids:
         resource(lift_keys[aisle], data.get("liftsPerAisle", 1))
     if data.get("returnToStorage"):
@@ -183,7 +194,9 @@ def run(data):
         def acquire_lift(self, level=None):
             self.aisle = definitions[level or self.job["level"]].get("aisle", "A1")
             yield from self.acquire(lift_keys[self.aisle])
-            self.lift_unit = next(unit for unit in lift_units[self.aisle] if not unit["busy"])
+            self.lift_unit = getattr(self, "preferred_unit", None) or next(unit for unit in lift_units[self.aisle] if not unit["busy"])
+            if self.lift_unit["busy"]:
+                raise AssertionError("Physical carrier assigned twice")
             self.lift_unit["busy"] = True
             self.lift_started = env.now()
             self.record["returnLiftUnit" if self.record.get("phase") == "return" else "liftUnit"] = self.lift_unit["id"]
@@ -224,14 +237,15 @@ def run(data):
                 return
             aisle = definitions[level].get("aisle", "A1")
             request = {"transport": self, "origin": origin, "target": target,
-                       "source": source, "destination": destination, "level": level}
+                       "source": source, "destination": destination, "level": level,
+                       "direction": "putaway" if source == "in-buffer" else "retrieve"}
             self.record["waitingSince"] = env.now()
             self.record["waitingHeld"] = list(self.record["held"])
             self.record["waitingFor"] = lift_keys[aisle]
             self.mark("waiting:two-load-lift")
             batch_queues[aisle].append(request)
             for worker in batch_workers:
-                if worker.aisle_id == aisle and worker.ispassive() and not worker.delivering:
+                if worker.aisle_id == aisle and worker.ispassive() and not worker.delivering and (data["lift"]["dispatchPolicy"] != "alternating-in-out" or worker.next_direction == request["direction"]):
                     worker.activate()
                     break
             yield self.passivate()  # Carrier has arrived at the destination.
@@ -272,11 +286,15 @@ def run(data):
                 if stop and stop[0] <= now:
                     self.mark("workstation-stopped")
                     metrics["workstation"]["pausedOccupiedSeconds"] += max(0, min(horizon, stop[1])-now)
+                    if explicit_workplaces:
+                        metrics["workplace-"+str(self.job["workstation"])]["pausedOccupiedSeconds"] += max(0,min(horizon,stop[1])-now)
                     yield self.hold(stop[1]-now)
                     continue
                 seconds = min(remaining, stop[0]-now) if stop else remaining
                 self.mark("workstation-processing")
                 metrics["workstation"]["processingSeconds"] += max(0, min(horizon-now, seconds))
+                if explicit_workplaces:
+                    metrics["workplace-"+str(self.job["workstation"])]["serviceSeconds"] += max(0,min(horizon-now,seconds))
                 yield from self.service("workstation", seconds)
                 remaining -= seconds
 
@@ -317,16 +335,22 @@ def run(data):
                 yield from self.acquire("outfeed")
                 self.release_node("out-buffer")
                 yield from self.service("outfeed", data["outfeedSeconds"])
+                if explicit_workplaces:
+                    yield from self.acquire("workplace-"+str(job["workstation"]))
                 yield from self.acquire("workstation")
                 self.release_node("outfeed")
                 yield from self.process_workstation()
                 counts["retrieved"] += 1
+                if explicit_workplaces:
+                    workplace_completed[job["workstation"]] += 1
                 r["retrievedAt"] = env.now()
                 self.mark("workstation-complete")
                 if data.get("returnToStorage"):
                     r["phase"] = "return"
                     yield from self.acquire("return")
                 self.release_node("workstation")
+                if explicit_workplaces:
+                    self.release_node("workplace-"+str(job["workstation"]))
                 if data.get("returnToStorage"):
                     yield self.hold(data["returnSeconds"])
                     target = data.get("returnLevel", key)
@@ -341,21 +365,28 @@ def run(data):
 
     class BatchLift(Transport):
         """One physical carrier, two slots; explicit non-optimized reference dispatch."""
-        def setup(self, aisle):
+        def setup(self, aisle, unit_index):
             self.aisle_id = aisle
             self.delivering = False
+            self.preferred_unit = lift_units[aisle][unit_index] if data["lift"]["dispatchPolicy"] == "alternating-in-out" else None
+            self.next_direction = data["lift"].get("initialDirection", "retrieve")
+            self.pending_cycle = None
 
         def process(self):
             queue = batch_queues[self.aisle_id]
             while True:
-                while not queue:
-                    yield self.passivate()
-                first = queue.pop(0)
+                alternating = data["lift"]["dispatchPolicy"] == "alternating-in-out"
+                first = None
+                while first is None:
+                    first = next((r for r in queue if not alternating or r["direction"] == self.next_direction), None)
+                    if first is None:
+                        yield self.passivate()
+                queue.remove(first)
                 self.delivering = True
                 # Wait before claiming the carrier; never wait indefinitely for a pair.
                 yield self.hold(data["lift"]["batchWaitSeconds"])
                 batch = [first]
-                partner = next((r for r in queue if r["origin"] == first["origin"]
+                partner = None if alternating else next((r for r in queue if r["origin"] == first["origin"]
                                 and r["target"] == first["target"]
                                 and r["destination"] == first["destination"]), None)
                 if partner is not None:
@@ -370,9 +401,16 @@ def run(data):
                           "jobs": [r["transport"].job["id"] for r in batch],
                           "originM": first["origin"], "targetM": first["target"],
                           "loaded": 0, "unloaded": 0, "completedAt": None}
+                report["operation"] = first["direction"]
                 lift_batches.append(report)
                 yield from self.acquire_lift(first["level"])
                 report["liftUnit"] = self.lift_unit["id"]
+                if alternating:
+                    if first["direction"] == "putaway":
+                        self.pending_cycle = {"id":"change-cycle-"+str(len(lift_cycles)+1),"liftUnit":self.lift_unit["id"],"putawayBatch":report["id"],"putawayJob":report["jobs"][0],"retrievalBatch":None,"retrievalJob":None,"startedAt":env.now(),"completedAt":None}
+                        lift_cycles.append(self.pending_cycle)
+                    elif self.pending_cycle is not None:
+                        self.pending_cycle["retrievalBatch"],self.pending_cycle["retrievalJob"] = report["id"],report["jobs"][0]
                 yield from self.move_lift(first["origin"])
                 for request in batch:
                     transport = request["transport"]
@@ -410,13 +448,18 @@ def run(data):
                 self.lift_unit["busy"] = False
                 self.release_node(lift_keys[self.aisle])
                 report["completedAt"] = env.now()
+                if alternating:
+                    if first["direction"] == "retrieve" and self.pending_cycle is not None:
+                        self.pending_cycle["completedAt"] = env.now()
+                        self.pending_cycle = None
+                    self.next_direction = "putaway" if first["direction"] == "retrieve" else "retrieve"
                 self.delivering = False
 
     snapshot({"id": "initial", "type": "system", "stage": "simulation-start"})
     if data["lift"].get("loadCapacity", 1) == 2:
         for aisle in aisle_ids:
-            for _ in range(data.get("liftsPerAisle", 1)):
-                batch_workers.append(BatchLift(aisle=aisle, env=env))
+            for unit_index in range(data.get("liftsPerAisle", 1)):
+                batch_workers.append(BatchLift(aisle=aisle, unit_index=unit_index, env=env))
     for job in data["jobs"]:
         Transport(job=job, at=job["arrivalSeconds"], env=env)
     env.run(till=horizon, priority=math.inf)
@@ -486,6 +529,9 @@ def run(data):
     return {"modelVersion": "kx-coupled-0.7", "dataStatus": "synthetic", "evidenceStatus": "reference_only", "inputSha256": hashlib.sha256(json.dumps(data, sort_keys=True).encode()).hexdigest(), "durationSeconds": horizon,
             "topology": {"aisles": len(aisle_ids), "liftsPerAisle": data.get("liftsPerAisle", 1), "totalLifts": sum(len(v) for v in lift_units.values()), "shuttles": len(definitions), "liftLoadCapacity": data["lift"].get("loadCapacity", 1)},
             "liftBatches": lift_batches,
+            "liftCycles": lift_cycles,
+            "liftDispatchWaits": [{"liftUnit":w.preferred_unit["id"],"nextDirection":w.next_direction,"queuedPutaway":sum(r["direction"]=="putaway" for r in batch_queues[w.aisle_id]),"queuedRetrieval":sum(r["direction"]=="retrieve" for r in batch_queues[w.aisle_id])} for w in batch_workers if w.preferred_unit is not None and not w.delivering and batch_queues[w.aisle_id]],
+            "workplaces": {str(i):{"completed":workplace_completed[i],"presentationsPerHour":workplace_completed[i]*3600/horizon,"planned":sum(j["type"]=="retrieve" and j.get("workstation")==i for j in data["jobs"]),"resource":"workplace-"+str(i)} for i in workplace_completed},
             "waitDiagnostics": diagnose(metrics, list(records.values()) + worker_records),
             "arrived": len(records), "completed": len(completed), "unfinished": len(records) - len(completed), "putawayCompleted": put, "retrievalCompleted": counts["retrieved"], "returnCompleted": counts["returned"], "returnsPending": counts["retrieved"] - counts["returned"] if data.get("returnToStorage") else 0,
             "flowSeconds": {"count": len(flows), "mean": sum(flows) / len(flows) if flows else None, "p95": percentile(flows, .95), "p99": percentile(flows, .99), "max": max(flows) if flows else None}, "resources": metrics, "domains": domain_metrics, "workloadByLevel": workload,
