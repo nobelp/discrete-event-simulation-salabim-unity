@@ -11,6 +11,16 @@ def case():
 
 
 class CoupledChecks(unittest.TestCase):
+    def test_parallel_workplaces_use_explicit_capacity(self):
+        d=case();d.update(workstationCapacity=4,workstationSeconds=80,durationSeconds=120)
+        d['levels'][0]['initialStock']=4
+        d['jobs']=[{'id':str(i),'type':'retrieve','level':'L1','arrivalSeconds':0,'relocations':0} for i in range(4)]
+        r=run(d)
+        self.assertEqual(r['resources']['workstation']['maximumOccupancy'],4)
+        self.assertEqual(r['retrievalCompleted'],4)
+        d['workstationCapacity']=0
+        with self.assertRaises(ValueError):run(d)
+
     def test_every_run_has_a_fresh_zero_time_initial_state(self):
         d=case();d['jobs']=[{'id':'in','type':'putaway','level':'L1','arrivalSeconds':5,'relocations':0}]
         first=run(d);second=run(d)

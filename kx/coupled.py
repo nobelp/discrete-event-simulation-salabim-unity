@@ -40,6 +40,7 @@ def validate(data):
         raise ValueError("Maximum duration: 86400 seconds")
     integer(data.get("seed"), "seed")
     integer(data.get("liftsPerAisle", 1), "liftsPerAisle", 1, 8)
+    integer(data.get("workstationCapacity", 1), "workstationCapacity", 1, 100)
     stops = data.get("workstationStops", [])
     if not isinstance(stops, list) or len(stops) > 100:
         raise ValueError("workstationStops: at most 100 explicit intervals required")
@@ -124,7 +125,7 @@ def run(data):
         resources[key] = sim.Resource(name=key, capacity=capacity, env=env)
         metrics[key] = {"capacity": capacity, "occupancy": 0, "maximumOccupancy": 0, "area": 0.0, "last": 0.0, "blockedSeconds": 0.0}
 
-    for key, capacity in [("infeed", 1), ("in-buffer", data["inBufferCapacity"]), ("out-buffer", data["outBufferCapacity"]), ("outfeed", 1), ("workstation", 1)]:
+    for key, capacity in [("infeed", 1), ("in-buffer", data["inBufferCapacity"]), ("out-buffer", data["outBufferCapacity"]), ("outfeed", 1), ("workstation", data.get("workstationCapacity", 1))]:
         resource(key, capacity)
     metrics["workstation"].update(scheduledDowntimeSeconds=sum(max(0, min(horizon, end)-start) for start, end in data.get("workstationStops", [])), pausedOccupiedSeconds=0.0, processingSeconds=0.0)
     for aisle in aisle_ids:

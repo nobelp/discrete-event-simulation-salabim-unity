@@ -55,7 +55,7 @@ This is not a validated plant/WCS strategy. Explicit workstation stop intervals
 can pause and resume processing with downstream backpressure; see
 [workstation stops](docs/workstation-stops.md). An explicitly chosen return level
 may also use another aisle's lift via the common infeed; full targets block without
-automatic fallback. Exact backlog timelines, completed-only P99 and separate unfinished ages are documented in [backlog statistics](docs/backlog.md). The Python suite now contains 46 tests.
+automatic fallback. Exact backlog timelines, completed-only P99 and separate unfinished ages are documented in [backlog statistics](docs/backlog.md). Every run records a fresh zero-time initial state; optional `workstationCapacity` gives parallel equivalent workplaces (default 1). The Python suite now contains 48 tests.
   
 ![image](https://github.com/markus-senger/discrete-event-simulation-salabim-unity/assets/77236323/5249cf12-cad5-4d95-970e-fabc261611c2)
 
