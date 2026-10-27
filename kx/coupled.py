@@ -347,10 +347,29 @@ def run(data):
     if len(records) != len(data["jobs"]):
         raise AssertionError("Transport arrivals not conserved")
     flows = [r["completedAt"] - r["arrivalSeconds"] for r in completed]
-    return {"modelVersion": "kx-coupled-0.5", "dataStatus": "synthetic", "evidenceStatus": "reference_only", "inputSha256": hashlib.sha256(json.dumps(data, sort_keys=True).encode()).hexdigest(), "durationSeconds": horizon,
+    ages = [horizon-r["arrivalSeconds"] for r in records.values() if r["completedAt"] is None]
+    events = {0: [0, 0], horizon: [0, 0]}
+    for r in records.values():
+        events.setdefault(r["arrivalSeconds"], [0, 0])[0] += 1
+        if r["completedAt"] is not None:
+            events.setdefault(r["completedAt"], [0, 0])[1] += 1
+    outstanding, maximum, area, previous, timeline = 0, 0, 0.0, 0.0, []
+    for time, (arrivals, completions) in sorted(events.items()):
+        area += outstanding * (time-previous)
+        outstanding += arrivals-completions
+        if outstanding < 0:
+            raise AssertionError("Negative order backlog")
+        maximum = max(maximum, outstanding)
+        timeline.append({"time": time, "outstanding": outstanding, "arrivals": arrivals, "completions": completions})
+        previous = time
+    if outstanding != len(ages):
+        raise AssertionError("Order backlog conservation violated")
+    return {"modelVersion": "kx-coupled-0.6", "dataStatus": "synthetic", "evidenceStatus": "reference_only", "inputSha256": hashlib.sha256(json.dumps(data, sort_keys=True).encode()).hexdigest(), "durationSeconds": horizon,
             "topology": {"aisles": len(aisle_ids), "liftsPerAisle": data.get("liftsPerAisle", 1), "totalLifts": sum(len(v) for v in lift_units.values()), "shuttles": len(definitions)},
             "arrived": len(records), "completed": len(completed), "unfinished": len(records) - len(completed), "putawayCompleted": put, "retrievalCompleted": counts["retrieved"], "returnCompleted": counts["returned"], "returnsPending": counts["retrieved"] - counts["returned"] if data.get("returnToStorage") else 0,
-            "flowSeconds": {"mean": sum(flows) / len(flows) if flows else None, "p95": percentile(flows, .95)}, "resources": metrics,
+            "flowSeconds": {"count": len(flows), "mean": sum(flows) / len(flows) if flows else None, "p95": percentile(flows, .95), "p99": percentile(flows, .99), "max": max(flows) if flows else None}, "resources": metrics,
+            "pendingAgeSeconds": {"count": len(ages), "mean": sum(ages)/len(ages) if ages else None, "max": max(ages) if ages else None, "p95": percentile(ages, .95), "p99": percentile(ages, .99)},
+            "backlog": {"atEnd": outstanding, "maximum": maximum, "timeWeightedMean": area/horizon, "timeline": timeline, "completionBoundary": "return-stored" if data.get("returnToStorage") else "putaway-stored-or-workplace-processed", "percentileMethod": "nearest-rank; completed flow times exclude unfinished jobs; pending ages reported separately"},
             "inventory": {k: {"initial": definitions[k]["initialStock"], "physical": physical[k], "available": len(stock[k]), "reservedForRetrieval": physical[k] - len(stock[k]), "reservedForPutaway": rack[k].claimed_quantity() - physical[k], "capacity": definitions[k]["storageCapacity"]} for k in definitions},
             "balance": {"initialStock": initial, "stored": put, "returned": counts["returned"], "pickedForRetrieval": retrieved_picked, "finalPhysicalStock": sum(physical.values())},
             "jobs": [{k: v for k, v in r.items() if k not in ["waitingHeld", "waitingSince"]} for r in records.values()], "trace": trace, "traceTruncated": len(trace) >= 5000,
