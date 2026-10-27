@@ -11,6 +11,18 @@ def case():
 
 
 class CoupledChecks(unittest.TestCase):
+    def test_every_run_has_a_fresh_zero_time_initial_state(self):
+        d=case();d['jobs']=[{'id':'in','type':'putaway','level':'L1','arrivalSeconds':5,'relocations':0}]
+        first=run(d);second=run(d)
+        self.assertEqual(first,second)
+        for r in [first,second]:
+            self.assertEqual(r['trace'][0]['time'],0)
+            self.assertEqual(r['trace'][0]['stage'],'simulation-start')
+            self.assertEqual(r['trace'][0]['stock'],{'L1':2})
+            self.assertTrue(all(n==0 for n in r['trace'][0]['resources'].values()))
+            self.assertEqual(r['trace'][0]['putaway'],0)
+            self.assertEqual(r['inventory']['L1']['physical'],3)
+
     def test_single_putaway_independent_hand_schedule(self):
         d=case();d['jobs']=[{'id':'in','type':'putaway','level':'L1','arrivalSeconds':0,'relocations':0}]
         r=run(d)

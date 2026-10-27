@@ -324,6 +324,7 @@ def run(data):
             r["completedAt"] = env.now()
             self.mark("complete")
 
+    snapshot({"id": "initial", "type": "system", "stage": "simulation-start"})
     for job in data["jobs"]:
         Transport(job=job, at=job["arrivalSeconds"], env=env)
     env.run(till=horizon, priority=math.inf)
