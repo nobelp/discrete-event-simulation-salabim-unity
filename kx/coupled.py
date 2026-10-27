@@ -57,6 +57,11 @@ def validate(data):
     lift = data.get("lift")
     if not isinstance(lift, dict):
         raise ValueError("Lift motion data required")
+    integer(lift.get("loadCapacity", 1), "lift loadCapacity", 1, 2)
+    if lift.get("loadCapacity", 1) == 2:
+        if lift.get("dispatchPolicy") != "same-level-fifo-batch":
+            raise ValueError("Two-load lift needs explicit same-level-fifo-batch reference policy")
+        finite(lift.get("batchWaitSeconds"), "batchWaitSeconds")
     for key in ["pickupSeconds", "dropoffSeconds"]:
         if key in lift: finite(lift[key], key)
     for key in ["speedMps", "accelerationMps2", "decelerationMps2"]:
@@ -111,6 +116,8 @@ def run(data):
     lift_keys = {a: "lift" if len(aisle_ids) == 1 else "lift-" + a for a in aisle_ids}
     lift_units = {a: [{"id": a + "-H" + str(i+1), "height": 0.0, "busy": False} for i in range(data.get("liftsPerAisle", 1))] for a in aisle_ids}
     counts = {"stored": 0, "picked": 0, "retrieved": 0, "returned": 0}
+    batch_queues = {a: [] for a in aisle_ids}
+    batch_workers, worker_records, lift_batches = [], [], []
 
     def resource(key, capacity):
         resources[key] = sim.Resource(name=key, capacity=capacity, env=env)
@@ -201,6 +208,33 @@ def run(data):
             yield from self.service(lift_keys[self.aisle], seconds)
             self.lift_unit["height"] = target
 
+        def transfer_lift(self, origin, target, source, destination, level):
+            if data["lift"].get("loadCapacity", 1) == 1:
+                yield from self.acquire_lift(level)
+                yield from self.move_lift(origin)
+                yield from self.service(lift_keys[self.aisle], data["lift"].get("pickupSeconds", data["pickupSeconds"]))
+                self.release_node(source)
+                yield from self.move_lift(target)
+                yield from self.acquire(destination)
+                yield from self.service(lift_keys[self.aisle], data["lift"].get("dropoffSeconds", data["dropoffSeconds"]))
+                yield from self.release_lift()
+                return
+            aisle = definitions[level].get("aisle", "A1")
+            request = {"transport": self, "origin": origin, "target": target,
+                       "source": source, "destination": destination, "level": level}
+            self.record["waitingSince"] = env.now()
+            self.record["waitingHeld"] = list(self.record["held"])
+            self.mark("waiting:two-load-lift")
+            batch_queues[aisle].append(request)
+            for worker in batch_workers:
+                if worker.aisle_id == aisle and worker.ispassive() and not worker.delivering:
+                    worker.activate()
+                    break
+            yield self.passivate()  # Carrier has arrived at the destination.
+            yield from self.acquire(destination)  # This transport owns its buffer slot.
+            request["worker"].activate()
+            yield self.passivate()  # Individual handover must finish before onward travel.
+
         def return_container(self, key, height):
             # Return to the explicit target via the shared infeed/lift/shuttle path.
             r = self.record
@@ -215,14 +249,7 @@ def run(data):
             yield from self.service("infeed", data["infeedSeconds"])
             yield from self.acquire("in-buffer")
             self.release_node("infeed")
-            yield from self.acquire_lift(key)
-            yield from self.move_lift(0)
-            yield from self.service(lift_keys[self.aisle], data["lift"].get("pickupSeconds", data["pickupSeconds"]))
-            self.release_node("in-buffer")
-            yield from self.move_lift(height)
-            yield from self.acquire("level-in-" + key)
-            yield from self.service(lift_keys[self.aisle], data["lift"].get("dropoffSeconds", data["dropoffSeconds"]))
-            yield from self.release_lift()
+            yield from self.transfer_lift(0, height, "in-buffer", "level-in-" + key, key)
             yield from self.acquire("shuttle-" + key)
             yield from self.service("shuttle-"+key, data["pickupSeconds"])
             self.release_node("level-in-" + key)
@@ -263,14 +290,7 @@ def run(data):
                 yield from self.service("infeed", data["infeedSeconds"])
                 yield from self.acquire("in-buffer")
                 self.release_node("infeed")
-                yield from self.acquire_lift()
-                yield from self.move_lift(0)
-                yield from self.service(lift_keys[self.aisle], data["lift"].get("pickupSeconds", data["pickupSeconds"]))
-                self.release_node("in-buffer")
-                yield from self.move_lift(height)
-                yield from self.acquire("level-in-" + key)
-                yield from self.service(lift_keys[self.aisle], data["lift"].get("dropoffSeconds", data["dropoffSeconds"]))
-                yield from self.release_lift()
+                yield from self.transfer_lift(0, height, "in-buffer", "level-in-" + key, key)
                 yield from self.acquire("shuttle-" + key)
                 yield from self.service("shuttle-"+key, data["pickupSeconds"])
                 self.release_node("level-in-" + key)
@@ -289,14 +309,7 @@ def run(data):
                 yield from self.acquire("level-out-" + key)
                 yield from self.service("shuttle-"+key, data["dropoffSeconds"])
                 self.release_node("shuttle-" + key)
-                yield from self.acquire_lift()
-                yield from self.move_lift(height)
-                yield from self.service(lift_keys[self.aisle], data["lift"].get("pickupSeconds", data["pickupSeconds"]))
-                self.release_node("level-out-" + key)
-                yield from self.move_lift(0)
-                yield from self.acquire("out-buffer")
-                yield from self.service(lift_keys[self.aisle], data["lift"].get("dropoffSeconds", data["dropoffSeconds"]))
-                yield from self.release_lift()
+                yield from self.transfer_lift(height, 0, "level-out-" + key, "out-buffer", key)
                 yield from self.acquire("outfeed")
                 self.release_node("out-buffer")
                 yield from self.service("outfeed", data["outfeedSeconds"])
@@ -322,11 +335,85 @@ def run(data):
             r["completedAt"] = env.now()
             self.mark("complete")
 
+    class BatchLift(Transport):
+        """One physical carrier, two slots; explicit non-optimized reference dispatch."""
+        def setup(self, aisle):
+            self.aisle_id = aisle
+            self.delivering = False
+
+        def process(self):
+            queue = batch_queues[self.aisle_id]
+            while True:
+                while not queue:
+                    yield self.passivate()
+                first = queue.pop(0)
+                self.delivering = True
+                # Wait before claiming the carrier; never wait indefinitely for a pair.
+                yield self.hold(data["lift"]["batchWaitSeconds"])
+                batch = [first]
+                partner = next((r for r in queue if r["origin"] == first["origin"]
+                                and r["target"] == first["target"]
+                                and r["destination"] == first["destination"]), None)
+                if partner is not None:
+                    queue.remove(partner)
+                    batch.append(partner)
+                self.job = {"level": first["level"]}
+                self.record = {"id": "lift-batch-" + str(len(lift_batches)+1),
+                               "type": "lift-batch", "stage": "dispatch", "held": [],
+                               "waitingSince": None, "waitingHeld": []}
+                worker_records.append(self.record)
+                report = {"id": self.record["id"], "dispatchAt": env.now(),
+                          "jobs": [r["transport"].job["id"] for r in batch],
+                          "originM": first["origin"], "targetM": first["target"],
+                          "loaded": 0, "unloaded": 0, "completedAt": None}
+                lift_batches.append(report)
+                yield from self.acquire_lift(first["level"])
+                report["liftUnit"] = self.lift_unit["id"]
+                yield from self.move_lift(first["origin"])
+                for request in batch:
+                    transport = request["transport"]
+                    yield from self.service(lift_keys[self.aisle], data["lift"].get("pickupSeconds", data["pickupSeconds"]))
+                    record = transport.record
+                    for held in record["waitingHeld"]:
+                        metrics[held]["blockedSeconds"] += env.now()-record["waitingSince"]
+                    record["waitingSince"], record["waitingHeld"] = None, []
+                    transport.release_node(request["source"])
+                    record["returnLiftUnit" if record.get("phase") == "return" else "liftUnit"] = self.lift_unit["id"]
+                    report["loaded"] += 1
+                    transport.mark("two-load-lift-loaded")
+                yield from self.move_lift(first["target"])
+                rate = data["lift"].get("rateBEhPerUnit")
+                if rate:
+                    drop_time = data["lift"].get("dropoffSeconds", data["dropoffSeconds"])
+                    yield from self.service(lift_keys[self.aisle], max(0, 3600*len(batch)/rate-(env.now()-self.lift_started)-len(batch)*drop_time), rate_wait=True)
+                for request in batch:
+                    transport = request["transport"]
+                    request["worker"] = self
+                    self.record["waitingSince"] = env.now()
+                    self.record["waitingHeld"] = [lift_keys[self.aisle]]
+                    self.mark("waiting:two-load-drop-buffer")
+                    transport.activate()
+                    yield self.passivate()
+                    metrics[lift_keys[self.aisle]]["blockedSeconds"] += env.now()-self.record["waitingSince"]
+                    self.record["waitingSince"], self.record["waitingHeld"] = None, []
+                    yield from self.service(lift_keys[self.aisle], data["lift"].get("dropoffSeconds", data["dropoffSeconds"]))
+                    report["unloaded"] += 1
+                    transport.mark("two-load-lift-unloaded")
+                    transport.activate()
+                self.lift_unit["busy"] = False
+                self.release_node(lift_keys[self.aisle])
+                report["completedAt"] = env.now()
+                self.delivering = False
+
     snapshot({"id": "initial", "type": "system", "stage": "simulation-start"})
+    if data["lift"].get("loadCapacity", 1) == 2:
+        for aisle in aisle_ids:
+            for _ in range(data.get("liftsPerAisle", 1)):
+                batch_workers.append(BatchLift(aisle=aisle, env=env))
     for job in data["jobs"]:
         Transport(job=job, at=job["arrivalSeconds"], env=env)
     env.run(till=horizon, priority=math.inf)
-    for record in records.values():
+    for record in list(records.values()) + worker_records:
         if record["waitingSince"] is not None:
             for held in record["waitingHeld"]:
                 metrics[held]["blockedSeconds"] += horizon - record["waitingSince"]
@@ -389,8 +476,9 @@ def run(data):
             bucket[str(job["relocations"])] = bucket.get(str(job["relocations"]),0)+1
             if data.get("returnToStorage"):
                 workload[data.get("returnLevel",job["level"])]["plannedReturns"] += 1
-    return {"modelVersion": "kx-coupled-0.6", "dataStatus": "synthetic", "evidenceStatus": "reference_only", "inputSha256": hashlib.sha256(json.dumps(data, sort_keys=True).encode()).hexdigest(), "durationSeconds": horizon,
-            "topology": {"aisles": len(aisle_ids), "liftsPerAisle": data.get("liftsPerAisle", 1), "totalLifts": sum(len(v) for v in lift_units.values()), "shuttles": len(definitions)},
+    return {"modelVersion": "kx-coupled-0.7", "dataStatus": "synthetic", "evidenceStatus": "reference_only", "inputSha256": hashlib.sha256(json.dumps(data, sort_keys=True).encode()).hexdigest(), "durationSeconds": horizon,
+            "topology": {"aisles": len(aisle_ids), "liftsPerAisle": data.get("liftsPerAisle", 1), "totalLifts": sum(len(v) for v in lift_units.values()), "shuttles": len(definitions), "liftLoadCapacity": data["lift"].get("loadCapacity", 1)},
+            "liftBatches": lift_batches,
             "arrived": len(records), "completed": len(completed), "unfinished": len(records) - len(completed), "putawayCompleted": put, "retrievalCompleted": counts["retrieved"], "returnCompleted": counts["returned"], "returnsPending": counts["retrieved"] - counts["returned"] if data.get("returnToStorage") else 0,
             "flowSeconds": {"count": len(flows), "mean": sum(flows) / len(flows) if flows else None, "p95": percentile(flows, .95), "p99": percentile(flows, .99), "max": max(flows) if flows else None}, "resources": metrics, "domains": domain_metrics, "workloadByLevel": workload,
             "pendingAgeSeconds": {"count": len(ages), "mean": sum(ages)/len(ages) if ages else None, "max": max(ages) if ages else None, "p95": percentile(ages, .95), "p99": percentile(ages, .99)},
@@ -398,7 +486,7 @@ def run(data):
             "inventory": {k: {"initial": definitions[k]["initialStock"], "physical": physical[k], "available": len(stock[k]), "reservedForRetrieval": physical[k] - len(stock[k]), "reservedForPutaway": rack[k].claimed_quantity() - physical[k], "capacity": definitions[k]["storageCapacity"]} for k in definitions},
             "balance": {"initialStock": initial, "stored": put, "returned": counts["returned"], "pickedForRetrieval": retrieved_picked, "finalPhysicalStock": sum(physical.values())},
             "jobs": [{k: v for k, v in r.items() if k not in ["waitingHeld", "waitingSince"]} for r in records.values()], "trace": trace, "traceTruncated": len(trace) >= 5000,
-            "limits": ["Synthetic reference case only; no validated plant performance. Explicit workstation downtime pauses remaining service while keeping the container; no additional availability factor.", "Separate shared single-load lift pool per aisle; individual positions; one shuttle per level; FIFO; no optimized double cycles. Optional BE/h limits are nominal throughput budgets, not calibrated double-cycle mechanics.", "Shuttle cycle and extra relocation time are explicit assumptions, not inferred from ABC or supplier percentages.", "Putaway reserves a rack slot before entering infeed. Retrieval reserves stock, releases physical slot at the end of its shuttle cycle.", "Finite buffers retain upstream resources; unfinished jobs may be queued, blocked or deadlocked, not an automatic deadlock proof.", "Optional return loop sends every retrieved container to its original or explicitly selected level via a finite return zone and shared infeed/lift/shuttle; no automatic alternate-level policy, empty-container supply, stochastic failures, real WCS handshakes, continuous belt headway, SKU/ABC placement or calibrated multi-depth storage."]}
+            "limits": ["Synthetic reference case only; no validated plant performance. Explicit workstation downtime pauses remaining service while keeping the container; no additional availability factor.", "Separate lift pool per aisle, individual positions, one shuttle per level. Default single-load; explicit two-load mode batches FIFO requests with identical origin/destination, shared physical travel, sequential handovers and bounded collection wait. No optimized mixed-direction double cycles or verified supplier WCS. Optional BE/h limits are nominal throughput budgets, not calibrated double-cycle mechanics.", "Shuttle cycle and extra relocation time are explicit assumptions, not inferred from ABC or supplier percentages.", "Putaway reserves a rack slot before entering infeed. Retrieval reserves stock, releases physical slot at the end of its shuttle cycle.", "Finite buffers retain upstream resources; unfinished jobs may be queued, blocked or deadlocked, not an automatic deadlock proof.", "Optional return loop sends every retrieved container to its original or explicitly selected level via a finite return zone and shared infeed/lift/shuttle; no automatic alternate-level policy, empty-container supply, stochastic failures, real WCS handshakes, continuous belt headway, SKU/ABC placement or calibrated multi-depth storage."]}
 
 
 if __name__ == "__main__":
