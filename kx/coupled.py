@@ -40,6 +40,11 @@ def validate(data):
         raise ValueError("Maximum duration: 86400 seconds")
     integer(data.get("seed"), "seed")
     integer(data.get("liftsPerAisle", 1), "liftsPerAisle", 1, 8)
+    if not isinstance(data.get("returnToStorage", False), bool):
+        raise ValueError("returnToStorage: boolean required")
+    if data.get("returnToStorage"):
+        finite(data.get("returnSeconds"), "returnSeconds")
+        integer(data.get("returnCapacity"), "returnCapacity", 1, 1000)
     for rate in [data.get("shuttleRateBEhPerUnit"), data.get("lift", {}).get("rateBEhPerUnit") if isinstance(data.get("lift"), dict) else None]:
         if rate is not None: finite(rate, "component BE/h rate", 1e-9)
     for name in ["infeedSeconds", "outfeedSeconds", "workstationSeconds", "shuttleCycleSeconds", "relocationSeconds", "pickupSeconds", "dropoffSeconds"]:
@@ -100,7 +105,7 @@ def run(data):
     aisle_ids = sorted({level.get("aisle", "A1") for level in data["levels"]})
     lift_keys = {a: "lift" if len(aisle_ids) == 1 else "lift-" + a for a in aisle_ids}
     lift_units = {a: [{"id": a + "-H" + str(i+1), "height": 0.0, "busy": False} for i in range(data.get("liftsPerAisle", 1))] for a in aisle_ids}
-    counts = {"stored": 0, "picked": 0, "retrieved": 0}
+    counts = {"stored": 0, "picked": 0, "retrieved": 0, "returned": 0}
 
     def resource(key, capacity):
         resources[key] = sim.Resource(name=key, capacity=capacity, env=env)
@@ -110,6 +115,8 @@ def run(data):
         resource(key, capacity)
     for aisle in aisle_ids:
         resource(lift_keys[aisle], data.get("liftsPerAisle", 1))
+    if data.get("returnToStorage"):
+        resource("return", data["returnCapacity"])
     for key in definitions:
         resource("shuttle-" + key, 1)
         resource("level-in-" + key, data["levelBufferCapacity"])
@@ -126,7 +133,7 @@ def run(data):
 
     def snapshot(record):
         if len(trace) < 5000:
-            trace.append({"time": env.now(), "job": record["id"], "type": record["type"], "stage": record["stage"], "resources": {k: m["occupancy"] for k, m in metrics.items()}, "stock": dict(physical), "putaway": counts["stored"], "retrieved": counts["retrieved"]})
+            trace.append({"time": env.now(), "job": record["id"], "type": record["type"], "stage": record["stage"], "resources": {k: m["occupancy"] for k, m in metrics.items()}, "stock": dict(physical), "putaway": counts["stored"], "retrieved": counts["retrieved"], "returned": counts["returned"]})
 
     class Transport(sim.Component):
         def setup(self, job):
@@ -176,6 +183,39 @@ def run(data):
             seconds = travel(abs(target - self.lift_unit["height"]), lift["speedMps"], lift["accelerationMps2"], lift["decelerationMps2"])
             yield self.hold(seconds)
             self.lift_unit["height"] = target
+
+        def return_container(self, key, height):
+            # Return to the same level via the shared infeed/lift/shuttle path.
+            r = self.record
+            r["waitingSince"], r["waitingHeld"] = env.now(), list(r["held"])
+            self.mark("waiting:storage-slot")
+            yield self.request(rack[key])
+            for held in r["waitingHeld"]:
+                metrics[held]["blockedSeconds"] += env.now() - r["waitingSince"]
+            r["waitingSince"], r["waitingHeld"] = None, []
+            yield from self.acquire("infeed")
+            self.release_node("return")
+            yield self.hold(data["infeedSeconds"])
+            yield from self.acquire("in-buffer")
+            self.release_node("infeed")
+            yield from self.acquire_lift()
+            yield from self.move_lift(0)
+            yield self.hold(data["lift"].get("pickupSeconds", data["pickupSeconds"]))
+            self.release_node("in-buffer")
+            yield from self.move_lift(height)
+            yield from self.acquire("level-in-" + key)
+            yield self.hold(data["lift"].get("dropoffSeconds", data["dropoffSeconds"]))
+            yield from self.release_lift()
+            yield from self.acquire("shuttle-" + key)
+            yield self.hold(data["pickupSeconds"])
+            self.release_node("level-in-" + key)
+            seconds = data["shuttleCycleSeconds"]
+            if data.get("shuttleRateBEhPerUnit"):
+                seconds = max(seconds, 3600 / data["shuttleRateBEhPerUnit"])
+            yield self.hold(seconds)
+            physical[key] += 1
+            yield self.to_store(stock[key], sim.Component(env=env))
+            self.release_node("shuttle-" + key)
 
         def process(self):
             job, key = self.job, self.job["level"]
@@ -233,8 +273,20 @@ def run(data):
                 yield from self.acquire("workstation")
                 self.release_node("outfeed")
                 yield self.hold(data["workstationSeconds"])
+                counts["retrieved"] += 1
+                r["retrievedAt"] = env.now()
+                self.mark("workstation-complete")
+                if data.get("returnToStorage"):
+                    r["phase"] = "return"
+                    yield from self.acquire("return")
                 self.release_node("workstation")
-            counts["stored" if job["type"] == "putaway" else "retrieved"] += 1
+                if data.get("returnToStorage"):
+                    yield self.hold(data["returnSeconds"])
+                    yield from self.return_container(key, height)
+                    counts["returned"] += 1
+                    r["returnedAt"] = env.now()
+            if job["type"] == "putaway":
+                counts["stored"] += 1
             r["completedAt"] = env.now()
             self.mark("complete")
 
@@ -253,7 +305,7 @@ def run(data):
     initial = sum(l["initialStock"] for l in data["levels"])
     put = sum(r["type"] == "putaway" for r in completed)
     retrieved_picked = counts["picked"]
-    if initial + put - retrieved_picked != sum(physical.values()):
+    if initial + put + counts["returned"] - retrieved_picked != sum(physical.values()):
         raise AssertionError("Physical inventory conservation violated")
     snapshot({"id": "measurement", "type": "system", "stage": "measurement-end"})
     if any(not 0 <= physical[k] <= definitions[k]["storageCapacity"] for k in physical):
@@ -261,14 +313,14 @@ def run(data):
     if len(records) != len(data["jobs"]):
         raise AssertionError("Transport arrivals not conserved")
     flows = [r["completedAt"] - r["arrivalSeconds"] for r in completed]
-    return {"modelVersion": "kx-coupled-0.2", "dataStatus": "synthetic", "evidenceStatus": "reference_only", "inputSha256": hashlib.sha256(json.dumps(data, sort_keys=True).encode()).hexdigest(), "durationSeconds": horizon,
+    return {"modelVersion": "kx-coupled-0.3", "dataStatus": "synthetic", "evidenceStatus": "reference_only", "inputSha256": hashlib.sha256(json.dumps(data, sort_keys=True).encode()).hexdigest(), "durationSeconds": horizon,
             "topology": {"aisles": len(aisle_ids), "liftsPerAisle": data.get("liftsPerAisle", 1), "totalLifts": sum(len(v) for v in lift_units.values()), "shuttles": len(definitions)},
-            "arrived": len(records), "completed": len(completed), "unfinished": len(records) - len(completed), "putawayCompleted": put, "retrievalCompleted": len(completed) - put,
+            "arrived": len(records), "completed": len(completed), "unfinished": len(records) - len(completed), "putawayCompleted": put, "retrievalCompleted": counts["retrieved"], "returnCompleted": counts["returned"], "returnsPending": counts["retrieved"] - counts["returned"] if data.get("returnToStorage") else 0,
             "flowSeconds": {"mean": sum(flows) / len(flows) if flows else None, "p95": percentile(flows, .95)}, "resources": metrics,
             "inventory": {k: {"initial": definitions[k]["initialStock"], "physical": physical[k], "available": len(stock[k]), "reservedForRetrieval": physical[k] - len(stock[k]), "reservedForPutaway": rack[k].claimed_quantity() - physical[k], "capacity": definitions[k]["storageCapacity"]} for k in definitions},
-            "balance": {"initialStock": initial, "stored": put, "pickedForRetrieval": retrieved_picked, "finalPhysicalStock": sum(physical.values())},
+            "balance": {"initialStock": initial, "stored": put, "returned": counts["returned"], "pickedForRetrieval": retrieved_picked, "finalPhysicalStock": sum(physical.values())},
             "jobs": [{k: v for k, v in r.items() if k not in ["waitingHeld", "waitingSince"]} for r in records.values()], "trace": trace, "traceTruncated": len(trace) >= 5000,
-            "limits": ["Synthetic reference case only; no validated plant performance.", "Separate shared single-load lift pool per aisle; individual positions; one shuttle per level; FIFO; no optimized double cycles. Optional BE/h limits are nominal throughput budgets, not calibrated double-cycle mechanics.", "Shuttle cycle and extra relocation time are explicit assumptions, not inferred from ABC or supplier percentages.", "Putaway reserves a rack slot before entering infeed. Retrieval reserves stock, releases physical slot at the end of its shuttle cycle.", "Finite buffers retain upstream resources; unfinished jobs may be queued, blocked or deadlocked, not an automatic deadlock proof.", "No failures, real WCS handshakes, continuous belt headway, SKU/ABC placement or calibrated multi-depth storage."]}
+            "limits": ["Synthetic reference case only; no validated plant performance.", "Separate shared single-load lift pool per aisle; individual positions; one shuttle per level; FIFO; no optimized double cycles. Optional BE/h limits are nominal throughput budgets, not calibrated double-cycle mechanics.", "Shuttle cycle and extra relocation time are explicit assumptions, not inferred from ABC or supplier percentages.", "Putaway reserves a rack slot before entering infeed. Retrieval reserves stock, releases physical slot at the end of its shuttle cycle.", "Finite buffers retain upstream resources; unfinished jobs may be queued, blocked or deadlocked, not an automatic deadlock proof.", "Optional return loop sends every retrieved container to its original level via a finite return zone and shared infeed/lift/shuttle; no alternate-level policy, empty-container supply, failures, real WCS handshakes, continuous belt headway, SKU/ABC placement or calibrated multi-depth storage."]}
 
 
 if __name__ == "__main__":
