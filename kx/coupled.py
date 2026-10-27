@@ -33,6 +33,8 @@ def validate(data):
     integer(data.get("seed"), "seed")
     integer(data.get("liftsPerAisle", 1), "liftsPerAisle", 1, 8)
     integer(data.get("workstationCapacity", 1), "workstationCapacity", 1, 100)
+    if "workstationBufferCapacity" in data:
+        integer(data["workstationBufferCapacity"], "workstationBufferCapacity", 1, 1000)
     stops = data.get("workstationStops", [])
     if not isinstance(stops, list) or len(stops) > 100:
         raise ValueError("workstationStops: at most 100 explicit intervals required")
@@ -103,6 +105,8 @@ def validate(data):
         for job in jobs:
             if job["type"] == "retrieve":
                 integer(job.get("workstation"), "explicit workstation", 1, data.get("workstationCapacity", 1))
+    if "workstationBufferCapacity" in data and any(j["type"] == "retrieve" and "workstation" not in j for j in jobs):
+        raise ValueError("Workstation buffers require an explicit target for every retrieval")
     return data
 
 
@@ -138,6 +142,8 @@ def run(data):
     for i in workplace_completed:
         resource("workplace-"+str(i),1)
         metrics["workplace-"+str(i)].update(pausedOccupiedSeconds=0.0)
+        if "workstationBufferCapacity" in data:
+            resource("workplace-buffer-"+str(i),data["workstationBufferCapacity"])
     for aisle in aisle_ids:
         resource(lift_keys[aisle], data.get("liftsPerAisle", 1))
     if data.get("returnToStorage"):
@@ -335,10 +341,20 @@ def run(data):
                 yield from self.acquire("outfeed")
                 self.release_node("out-buffer")
                 yield from self.service("outfeed", data["outfeedSeconds"])
+                buffered = "workstationBufferCapacity" in data
+                if buffered:
+                    yield from self.acquire("workplace-buffer-"+str(job["workstation"]))
+                    self.release_node("outfeed")
+                    r["workplaceBufferArrivedAt"] = env.now()
+                    self.mark("workplace-buffer-arrived")
                 if explicit_workplaces:
                     yield from self.acquire("workplace-"+str(job["workstation"]))
                 yield from self.acquire("workstation")
-                self.release_node("outfeed")
+                if buffered:
+                    self.release_node("workplace-buffer-"+str(job["workstation"]))
+                else:
+                    self.release_node("outfeed")
+                r["workplaceStartedAt"] = env.now()
                 yield from self.process_workstation()
                 counts["retrieved"] += 1
                 if explicit_workplaces:
