@@ -12,22 +12,13 @@ import math
 import sys
 import salabim as sim
 from .simulation import finite, percentile
+from .cycle_times import travel
 
 
 def integer(value, name, minimum=0, maximum=100000):
     if isinstance(value, bool) or not isinstance(value, int) or not minimum <= value <= maximum:
         raise ValueError(f"{name}: integer {minimum}..{maximum} required")
     return value
-
-
-def travel(distance, speed, acceleration, deceleration):
-    if distance == 0:
-        return 0
-    ramps = speed * speed / (2 * acceleration) + speed * speed / (2 * deceleration)
-    if distance <= ramps:
-        peak = math.sqrt(2 * distance / (1 / acceleration + 1 / deceleration))
-        return peak / acceleration + peak / deceleration
-    return speed / acceleration + speed / deceleration + (distance - ramps) / speed
 
 
 def validate(data):
@@ -123,7 +114,7 @@ def run(data):
 
     def resource(key, capacity):
         resources[key] = sim.Resource(name=key, capacity=capacity, env=env)
-        metrics[key] = {"capacity": capacity, "occupancy": 0, "maximumOccupancy": 0, "area": 0.0, "last": 0.0, "blockedSeconds": 0.0}
+        metrics[key] = {"capacity": capacity, "occupancy": 0, "maximumOccupancy": 0, "area": 0.0, "last": 0.0, "blockedSeconds": 0.0, "serviceSeconds": 0.0, "rateWaitSeconds": 0.0, "visits": 0}
 
     for key, capacity in [("infeed", 1), ("in-buffer", data["inBufferCapacity"]), ("out-buffer", data["outBufferCapacity"]), ("outfeed", 1), ("workstation", data.get("workstationCapacity", 1))]:
         resource(key, capacity)
@@ -169,6 +160,7 @@ def run(data):
             r["waitingSince"] = None
             r["waitingHeld"] = []
             r["held"].append(key)
+            metrics[key]["visits"] += 1
             change(key, 1)
             self.mark(key)
 
@@ -189,14 +181,24 @@ def run(data):
         def release_lift(self):
             rate = data["lift"].get("rateBEhPerUnit")
             if rate:
-                yield self.hold(max(0, 3600 / rate - (env.now() - self.lift_started)))
+                yield from self.service(lift_keys[self.aisle], max(0, 3600 / rate - (env.now() - self.lift_started)), rate_wait=True)
             self.lift_unit["busy"] = False
             self.release_node(lift_keys[self.aisle])
+
+        def service(self, key, seconds, rate_wait=False):
+            # Count only time actually inside the measurement window.
+            metrics[key]["rateWaitSeconds" if rate_wait else "serviceSeconds"] += max(0, min(seconds, horizon-env.now()))
+            yield self.hold(seconds)
+
+        def shuttle_cycle(self, key, seconds):
+            yield from self.service("shuttle-"+key, seconds)
+            if data.get("shuttleRateBEhPerUnit"):
+                yield from self.service("shuttle-"+key, max(0, 3600/data["shuttleRateBEhPerUnit"]-seconds), rate_wait=True)
 
         def move_lift(self, target):
             lift = data["lift"]
             seconds = travel(abs(target - self.lift_unit["height"]), lift["speedMps"], lift["accelerationMps2"], lift["decelerationMps2"])
-            yield self.hold(seconds)
+            yield from self.service(lift_keys[self.aisle], seconds)
             self.lift_unit["height"] = target
 
         def return_container(self, key, height):
@@ -210,24 +212,21 @@ def run(data):
             r["waitingSince"], r["waitingHeld"] = None, []
             yield from self.acquire("infeed")
             self.release_node("return")
-            yield self.hold(data["infeedSeconds"])
+            yield from self.service("infeed", data["infeedSeconds"])
             yield from self.acquire("in-buffer")
             self.release_node("infeed")
             yield from self.acquire_lift(key)
             yield from self.move_lift(0)
-            yield self.hold(data["lift"].get("pickupSeconds", data["pickupSeconds"]))
+            yield from self.service(lift_keys[self.aisle], data["lift"].get("pickupSeconds", data["pickupSeconds"]))
             self.release_node("in-buffer")
             yield from self.move_lift(height)
             yield from self.acquire("level-in-" + key)
-            yield self.hold(data["lift"].get("dropoffSeconds", data["dropoffSeconds"]))
+            yield from self.service(lift_keys[self.aisle], data["lift"].get("dropoffSeconds", data["dropoffSeconds"]))
             yield from self.release_lift()
             yield from self.acquire("shuttle-" + key)
-            yield self.hold(data["pickupSeconds"])
+            yield from self.service("shuttle-"+key, data["pickupSeconds"])
             self.release_node("level-in-" + key)
-            seconds = data["shuttleCycleSeconds"]
-            if data.get("shuttleRateBEhPerUnit"):
-                seconds = max(seconds, 3600 / data["shuttleRateBEhPerUnit"])
-            yield self.hold(seconds)
+            yield from self.shuttle_cycle(key, data["shuttleCycleSeconds"])
             physical[key] += 1
             yield self.to_store(stock[key], sim.Component(env=env))
             self.release_node("shuttle-" + key)
@@ -247,7 +246,7 @@ def run(data):
                 seconds = min(remaining, stop[0]-now) if stop else remaining
                 self.mark("workstation-processing")
                 metrics["workstation"]["processingSeconds"] += max(0, min(horizon-now, seconds))
-                yield self.hold(seconds)
+                yield from self.service("workstation", seconds)
                 remaining -= seconds
 
         def process(self):
@@ -257,27 +256,25 @@ def run(data):
             self.mark("arrival")
             height = definitions[key]["heightM"]
             shuttle_time = data["shuttleCycleSeconds"] + job["relocations"] * data["relocationSeconds"]
-            if data.get("shuttleRateBEhPerUnit"):
-                shuttle_time = max(shuttle_time, 3600 / data["shuttleRateBEhPerUnit"])
             if job["type"] == "putaway":
                 self.mark("waiting:storage-slot")
                 yield self.request(rack[key])
                 yield from self.acquire("infeed")
-                yield self.hold(data["infeedSeconds"])
+                yield from self.service("infeed", data["infeedSeconds"])
                 yield from self.acquire("in-buffer")
                 self.release_node("infeed")
                 yield from self.acquire_lift()
                 yield from self.move_lift(0)
-                yield self.hold(data["lift"].get("pickupSeconds", data["pickupSeconds"]))
+                yield from self.service(lift_keys[self.aisle], data["lift"].get("pickupSeconds", data["pickupSeconds"]))
                 self.release_node("in-buffer")
                 yield from self.move_lift(height)
                 yield from self.acquire("level-in-" + key)
-                yield self.hold(data["lift"].get("dropoffSeconds", data["dropoffSeconds"]))
+                yield from self.service(lift_keys[self.aisle], data["lift"].get("dropoffSeconds", data["dropoffSeconds"]))
                 yield from self.release_lift()
                 yield from self.acquire("shuttle-" + key)
-                yield self.hold(data["pickupSeconds"])
+                yield from self.service("shuttle-"+key, data["pickupSeconds"])
                 self.release_node("level-in-" + key)
-                yield self.hold(shuttle_time)
+                yield from self.shuttle_cycle(key, shuttle_time)
                 physical[key] += 1
                 yield self.to_store(stock[key], sim.Component(env=env))
                 self.release_node("shuttle-" + key)
@@ -285,24 +282,24 @@ def run(data):
                 self.mark("waiting:available-stock")
                 yield self.from_store(stock[key])
                 yield from self.acquire("shuttle-" + key)
-                yield self.hold(shuttle_time)
+                yield from self.shuttle_cycle(key, shuttle_time)
                 physical[key] -= 1
                 counts["picked"] += 1
                 rack[key].release(1)
                 yield from self.acquire("level-out-" + key)
-                yield self.hold(data["dropoffSeconds"])
+                yield from self.service("shuttle-"+key, data["dropoffSeconds"])
                 self.release_node("shuttle-" + key)
                 yield from self.acquire_lift()
                 yield from self.move_lift(height)
-                yield self.hold(data["lift"].get("pickupSeconds", data["pickupSeconds"]))
+                yield from self.service(lift_keys[self.aisle], data["lift"].get("pickupSeconds", data["pickupSeconds"]))
                 self.release_node("level-out-" + key)
                 yield from self.move_lift(0)
                 yield from self.acquire("out-buffer")
-                yield self.hold(data["lift"].get("dropoffSeconds", data["dropoffSeconds"]))
+                yield from self.service(lift_keys[self.aisle], data["lift"].get("dropoffSeconds", data["dropoffSeconds"]))
                 yield from self.release_lift()
                 yield from self.acquire("outfeed")
                 self.release_node("out-buffer")
-                yield self.hold(data["outfeedSeconds"])
+                yield from self.service("outfeed", data["outfeedSeconds"])
                 yield from self.acquire("workstation")
                 self.release_node("outfeed")
                 yield from self.process_workstation()
@@ -337,6 +334,24 @@ def run(data):
         m["area"] += m["occupancy"] * (horizon - m["last"])
         m["meanOccupancy"] = m["area"] / horizon
         m["occupiedFraction"] = m["area"] / (horizon * m["capacity"])
+        denominator = horizon*m["capacity"]
+        m["serviceFraction"] = m["serviceSeconds"]/denominator
+        m["blockedFraction"] = m["blockedSeconds"]/denominator
+        m["rateWaitFraction"] = m["rateWaitSeconds"]/denominator
+        m["pausedFraction"] = m.get("pausedOccupiedSeconds",0)/denominator
+        residual = m["area"]-m["serviceSeconds"]-m["blockedSeconds"]-m["rateWaitSeconds"]-m.get("pausedOccupiedSeconds",0)
+        if residual < -1e-6:
+            raise AssertionError("Overlapping resource-state accounting")
+        m["otherHeldFraction"] = max(0,residual)/denominator
+        m["idleFraction"] = 1-m["occupiedFraction"]
+    groups = {"conveyors": ["infeed","outfeed"], "lifts": list(lift_keys.values()), "rocketShuttles": ["shuttle-"+k for k in definitions], "workplaces": ["workstation"]}
+    domain_metrics = {}
+    for name, keys in groups.items():
+        capacity = sum(metrics[k]["capacity"] for k in keys)
+        domain_metrics[name] = {"resources":keys,"capacity":capacity,"visits":sum(metrics[k]["visits"] for k in keys)}
+        for field in ["occupiedFraction","serviceFraction","blockedFraction","rateWaitFraction","pausedFraction","otherHeldFraction","idleFraction"]:
+            domain_metrics[name][field] = sum(metrics[k][field]*metrics[k]["capacity"] for k in keys)/capacity
+        domain_metrics[name]["maximumSingleResourceOccupancy"] = max(metrics[k]["occupiedFraction"] for k in keys)
     completed = [r for r in records.values() if r["completedAt"] is not None]
     initial = sum(l["initialStock"] for l in data["levels"])
     put = sum(r["type"] == "putaway" for r in completed)
@@ -366,10 +381,18 @@ def run(data):
         previous = time
     if outstanding != len(ages):
         raise AssertionError("Order backlog conservation violated")
+    workload = {k:{"putaway":0,"retrieve":0,"plannedReturns":0,"relocations":{}} for k in definitions}
+    for job in data["jobs"]:
+        workload[job["level"]][job["type"]] += 1
+        if job["type"] == "retrieve":
+            bucket = workload[job["level"]]["relocations"]
+            bucket[str(job["relocations"])] = bucket.get(str(job["relocations"]),0)+1
+            if data.get("returnToStorage"):
+                workload[data.get("returnLevel",job["level"])]["plannedReturns"] += 1
     return {"modelVersion": "kx-coupled-0.6", "dataStatus": "synthetic", "evidenceStatus": "reference_only", "inputSha256": hashlib.sha256(json.dumps(data, sort_keys=True).encode()).hexdigest(), "durationSeconds": horizon,
             "topology": {"aisles": len(aisle_ids), "liftsPerAisle": data.get("liftsPerAisle", 1), "totalLifts": sum(len(v) for v in lift_units.values()), "shuttles": len(definitions)},
             "arrived": len(records), "completed": len(completed), "unfinished": len(records) - len(completed), "putawayCompleted": put, "retrievalCompleted": counts["retrieved"], "returnCompleted": counts["returned"], "returnsPending": counts["retrieved"] - counts["returned"] if data.get("returnToStorage") else 0,
-            "flowSeconds": {"count": len(flows), "mean": sum(flows) / len(flows) if flows else None, "p95": percentile(flows, .95), "p99": percentile(flows, .99), "max": max(flows) if flows else None}, "resources": metrics,
+            "flowSeconds": {"count": len(flows), "mean": sum(flows) / len(flows) if flows else None, "p95": percentile(flows, .95), "p99": percentile(flows, .99), "max": max(flows) if flows else None}, "resources": metrics, "domains": domain_metrics, "workloadByLevel": workload,
             "pendingAgeSeconds": {"count": len(ages), "mean": sum(ages)/len(ages) if ages else None, "max": max(ages) if ages else None, "p95": percentile(ages, .95), "p99": percentile(ages, .99)},
             "backlog": {"atEnd": outstanding, "maximum": maximum, "timeWeightedMean": area/horizon, "timeline": timeline, "completionBoundary": "return-stored" if data.get("returnToStorage") else "putaway-stored-or-workplace-processed", "percentileMethod": "nearest-rank; completed flow times exclude unfinished jobs; pending ages reported separately"},
             "inventory": {k: {"initial": definitions[k]["initialStock"], "physical": physical[k], "available": len(stock[k]), "reservedForRetrieval": physical[k] - len(stock[k]), "reservedForPutaway": rack[k].claimed_quantity() - physical[k], "capacity": definitions[k]["storageCapacity"]} for k in definitions},
